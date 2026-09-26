@@ -7,11 +7,11 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 
 | Question | Decision |
 |---|---|
-| Approach | **D — Go + cgofuse**: one codebase mounting through WinFsp (Windows), macFUSE (Mac), libfuse (Linux). Same stack `rclone mount` uses. Native CfApi / File Provider can come later behind the same core. |
+| Approach | **D — rclone as a library + a ZDrive backend** (`backend/zdrive`). rclone supplies mount (WinFsp on Windows, built-in NFS client on macOS via `nfsmount`, FUSE on Linux), the VFS block cache and LRU eviction. Native CfApi / File Provider can come later. |
 | Write path (design OQ2) | **Full read-write**, delivered in milestones: read-only first, then writes. |
 | Test machines | Windows PC + Mac (owner's). Linux (this box) for dev/CI, always against **staging.zhdrive.in**, never production. |
 | Eviction (design OQ3) | Size-capped LRU block cache, default 10 GB, user-configurable; pinned files exempt (pinning lands in M3). |
-| Background auth (design OQ4) | Client sends `Authorization: Bearer` to a new Range-capable stream endpoint — no 60 s ticket involved. Long-lived login via device-code flow (M1). |
+| Background auth (design OQ4) | Client sends `Authorization: Bearer` to a new Range-capable stream endpoint — no 60 s ticket involved. Long-lived login via device-code flow (B4, before beta; M1 testing uses the `zd_session` cookie). |
 | Demand evidence (design OQ1) | Owner chose to proceed with the build; attach the ticket when available. |
 
 ## Hard scale rules (from the design)
@@ -30,13 +30,13 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 
 ## Milestones
 
-### M0 — Backend foundations (backend repo, normal PR → staging → merge flow)
+### M0 — Backend foundations — B1 + B2 LIVE in production 2026-09-26; B3 moved to M2, B4 before beta (backend repo, normal PR → staging → merge flow)
 - **B1** `GET /files/:id/stream` — Bearer-authenticated, honours `Range` (206 / `Content-Range` / `Accept-Ranges` / `ETag`), both encryption layouts + unencrypted. ← **first task**
 - **B2** Paginated listing: `GET /drive/list?folderId=&cursor=` → `{ folders, files, nextCursor }` with `id, name, size, updatedAt, revision`.
 - **B3** `If-Match` revision check on `POST /files/:id/version`, rename, move → `409` on mismatch.
 - **B4** Device-code login (`/auth/device/start`, `/auth/device/poll`, web approval page at `/device`) issuing a Session-backed, revocable, longer-lived token.
 
-### M1 — Read-only mount (new `zdrive-desktop` repo)
+### M1 — Read-only mount — BUILT 2026-09-26, verified on Linux vs staging; awaiting Windows/Mac test
 - Go module: API client, token in OS keychain, config.
 - cgofuse filesystem: `getattr`, `readdir` (lazy, TTL-cached), `open`/`read` via Range into an on-disk block cache (4 MB blocks) with LRU eviction.
 - Writes return `EROFS` in this milestone.
