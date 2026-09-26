@@ -1,0 +1,17 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: go test ./...
+      - run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags cmount -o dist/zdrive-windows-amd64.exe .
+          GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o dist/zdrive-macos-arm64 .
+          GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-macos-amd64 .
+          GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-linux-amd64 .
+      - uses: actions/upload-artifact@v4
+        with: { name: zdrive-binaries, path: dist/ }
