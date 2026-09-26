@@ -42,7 +42,9 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - Writes return `EROFS` in this milestone.
 - Test: Linux against staging here; cross-compiled Windows (WinFsp) and Mac (macFUSE) builds handed to owner.
 
-### M2 — Writes
+### M2 — Writes — BUILT 2026-09-26 (fake-API tests only; not yet run against staging)
+- Done: mkdir, create (`POST /storage/upload`), edit (`POST /files/:id/version`), file rename/move, unlink → trash, rmdir (empty only), folder rename in place. Write-back/staging is rclone's VFS cache (`--vfs-cache-mode full`).
+- Not yet: If-Match/409 conflict copies (needs B3), editor temp-file ignore list, multipart large uploads (single request, ≤2 GB, buffered server-side), `ENOSPC` mapping. Folder moves across parents fall back to per-file moves (API can't re-parent folders).
 - `mkdir`, `create`, `rename`/move, `unlink` (→ trash, recoverable), `rmdir`.
 - Write-back: edits go to a local staging file; on close, upload (new file → upload, existing → new version with `If-Match`).
 - Conflict: server `409` → keep both, local copy saved as `name (conflicted copy <host> <date>).ext`.

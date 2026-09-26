@@ -2,7 +2,7 @@
 
 Mounts your ZDrive as a local drive. Files download on demand, by byte range, and are cached locally (LRU, size-capped). Built on [rclone](https://rclone.org)'s mount + VFS cache with a ZDrive backend (`backend/zdrive`). Plan: [docs/PLAN.md](docs/PLAN.md).
 
-**Status: M1, read-only.** Writes are refused (`Read-only file system`).
+**Status: M2, read-write.** Create, edit, rename, move and delete (files go to ZDrive trash). No conflict detection yet: last writer wins.
 
 ## Try it
 

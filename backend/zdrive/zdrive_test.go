@@ -2,6 +2,7 @@ package zdrive
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/object"
 )
 
 // Fake API: root has folder "Docs" (on page 1) and file "a.txt" (on page 2,
@@ -76,5 +78,101 @@ func TestListAndRangeRead(t *testing.T) {
 	rc.Close()
 	if string(got) != "56789" {
 		t.Fatalf("range read = %q", got)
+	}
+}
+
+// Fake API that logs every write call and keeps just enough listing state.
+func TestWrites(t *testing.T) {
+	var calls []string
+	rootFolders, docsFiles := `[]`, `[]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := r.Method + " " + r.URL.Path
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Error(err)
+			}
+			fh := r.MultipartForm.File["file"][0]
+			part, _ := fh.Open()
+			body, _ := io.ReadAll(part)
+			ct, _, _ := strings.Cut(fh.Header.Get("Content-Type"), ";")
+			call += fmt.Sprintf(" folderId=%q %s:%s:%s", r.FormValue("folderId"), fh.Filename, body, ct)
+		} else if r.Body != nil {
+			body, _ := io.ReadAll(r.Body)
+			call += " " + string(body)
+		}
+		if r.Method != "GET" {
+			calls = append(calls, call)
+		}
+		switch r.URL.Path {
+		case "/drive/list":
+			folders, files := rootFolders, `[]`
+			if r.URL.Query().Get("folderId") == "d1" {
+				folders, files = `[]`, docsFiles
+			}
+			io.WriteString(w, `{"folders":`+folders+`,"files":`+files+`,"nextCursor":null}`)
+		case "/folders":
+			io.WriteString(w, `{"id":"d1","name":"Docs"}`)
+		case "/folders/d1":
+			rootFolders = `[{"id":"d1","name":"Papers"}]`
+			io.WriteString(w, `{"id":"d1","name":"Papers"}`)
+		case "/storage/upload":
+			docsFiles = `[{"id":"f1","name":"résumé.txt","size":"5","updatedAt":"2026-09-26T10:00:00Z"}]`
+			io.WriteString(w, `{"id":"f1","name":"résumé.txt","size":5,"folderId":"d1"}`)
+		case "/files/f1/version":
+			io.WriteString(w, `{"success":true,"file":{"id":"f1","name":"résumé.txt","size":"7","updatedAt":"2026-09-26T11:00:00Z"}}`)
+		case "/files/f1/move":
+			docsFiles = `[]`
+			io.WriteString(w, `{"id":"f1","size":"7","updatedAt":"2026-09-26T12:00:00Z"}`)
+		default:
+			io.WriteString(w, `{"id":"f1","size":"7","updatedAt":"2026-09-26T12:00:01Z"}`)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Mkdir(ctx, "Docs"); err != nil {
+		t.Fatal(err)
+	}
+	src := object.NewStaticObjectInfo("Docs/résumé.txt", time.Now(), 5, true, nil, nil)
+	o, err := f.Put(ctx, strings.NewReader("hello"), src)
+	if err != nil || o.Size() != 5 {
+		t.Fatalf("Put = %v, %v", o, err)
+	}
+	if err := o.Update(ctx, strings.NewReader("hello 2"), object.NewStaticObjectInfo("Docs/résumé.txt", time.Now(), 7, true, nil, nil)); err != nil || o.Size() != 7 {
+		t.Fatalf("Update = %v, size %d", err, o.Size())
+	}
+	if err := f.Rmdir(ctx, "Docs"); err != fs.ErrorDirectoryNotEmpty {
+		t.Fatalf("Rmdir non-empty = %v", err)
+	}
+	o, err = f.Features().Move(ctx, o, "b.txt")
+	if err != nil || o.Remote() != "b.txt" || o.ModTime(ctx).Hour() != 12 {
+		t.Fatalf("Move = %v, %v", o, err)
+	}
+	if err := o.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Features().DirMove(ctx, f, "Docs", "Papers"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Rmdir(ctx, "Papers"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`POST /folders {"name":"Docs"}`,
+		`POST /storage/upload folderId="d1" résumé.txt:hello:text/plain`,
+		`POST /files/f1/version folderId="" résumé.txt:hello 2:text/plain`,
+		`PATCH /files/f1/move {}`,
+		`PATCH /files/f1 {"name":"b.txt"}`,
+		`DELETE /files/f1 `,
+		`PATCH /folders/d1 {"name":"Papers"}`,
+		`DELETE /folders/d1 `,
+	}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
