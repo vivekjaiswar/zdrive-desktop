@@ -176,3 +176,63 @@ func TestWrites(t *testing.T) {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// TestUpdateConflict: a stale If-Match on a version upload gets a 409, and
+// the edit is kept as a new sibling file (B3's "keep both") instead of
+// being dropped or overwriting a remote change this client never saw.
+func TestUpdateConflict(t *testing.T) {
+	var ifMatches []string
+	var copyUploaded bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/list", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("folderId") == "" {
+			io.WriteString(w, `{"folders":[],"files":[{"id":"f1","name":"a.txt","size":"5","updatedAt":"2026-09-26T10:00:00Z"}],"nextCursor":null}`)
+			return
+		}
+		io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`)
+	})
+	mux.HandleFunc("/files/f1/version", func(w http.ResponseWriter, r *http.Request) {
+		ifMatches = append(ifMatches, r.Header.Get("If-Match"))
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"message":"File has changed since it was last read"}`)
+	})
+	mux.HandleFunc("/storage/upload", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		fh := r.MultipartForm.File["file"][0]
+		part, _ := fh.Open()
+		body, _ := io.ReadAll(part)
+		if string(body) != "new content" {
+			t.Fatalf("conflicted copy body = %q", body)
+		}
+		if !strings.Contains(fh.Filename, "(conflicted copy ") || !strings.HasSuffix(fh.Filename, ".txt") {
+			t.Fatalf("conflicted copy name = %q", fh.Filename)
+		}
+		copyUploaded = true
+		io.WriteString(w, `{"id":"f2","name":"`+fh.Filename+`","size":11,"folderId":null}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.NewObject(ctx, "a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = o.Update(ctx, strings.NewReader("new content"), object.NewStaticObjectInfo("a.txt", time.Now(), 11, true, nil, nil))
+	if err != nil {
+		t.Fatalf("Update should resolve the conflict, not fail: %v", err)
+	}
+	if len(ifMatches) != 1 || ifMatches[0] != "1790416800000" {
+		t.Fatalf("If-Match sent = %v, want the object's revision", ifMatches)
+	}
+	if !copyUploaded {
+		t.Fatal("conflicted copy was never uploaded")
+	}
+}

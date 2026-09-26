@@ -1,8 +1,6 @@
 // Package zdrive is an rclone backend for the ZDrive API. rclone supplies
 // the mount, VFS cache and eviction; this file only maps paths to ZDrive
 // folder/file IDs, reads content by byte range and writes via the web API.
-//
-// ponytail: last writer wins. Add If-Match on version/rename/move with B3.
 package zdrive
 
 import (
@@ -16,6 +14,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -116,6 +115,19 @@ func errorHandler(resp *http.Response) error {
 func isNotFound(err error) bool {
 	var e *apiError
 	return errors.As(err, &e) && e.Status == http.StatusNotFound
+}
+
+func isConflict(err error) bool {
+	var e *apiError
+	return errors.As(err, &e) && e.Status == http.StatusConflict
+}
+
+// revisionOf is the If-Match value for a write against a file last seen with
+// this modTime - the same value drive/list's "revision" field carries, so a
+// write only succeeds if the file hasn't changed since this client's last
+// listing or open (B3).
+func revisionOf(modTime time.Time) string {
+	return strconv.FormatInt(modTime.UnixMilli(), 10)
 }
 
 // NewFs builds an Fs from config.
@@ -263,8 +275,8 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 }
 
 // upload POSTs in as multipart field "file" plus params, decoding the reply
-// into result. Streams: nothing is buffered client-side.
-func (f *Fs) upload(ctx context.Context, apiPath string, params url.Values, name string, in io.Reader, src fs.ObjectInfo, result any) error {
+// into result. Streams: nothing is buffered client-side. headers may be nil.
+func (f *Fs) upload(ctx context.Context, apiPath string, params url.Values, name string, in io.Reader, src fs.ObjectInfo, result any, headers map[string]string) error {
 	pr, pw := io.Pipe()
 	defer pr.Close() // unblocks the writer if the request fails early
 	mw := multipart.NewWriter(pw)
@@ -290,7 +302,7 @@ func (f *Fs) upload(ctx context.Context, apiPath string, params url.Values, name
 			return mw.Close()
 		}())
 	}()
-	opts := rest.Opts{Method: "POST", Path: apiPath, Body: pr, ContentType: mw.FormDataContentType()}
+	opts := rest.Opts{Method: "POST", Path: apiPath, Body: pr, ContentType: mw.FormDataContentType(), ExtraHeaders: headers}
 	_, err := f.srv.CallJSON(ctx, &opts, nil, result)
 	return err
 }
@@ -306,7 +318,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		params.Set("folderId", dirID)
 	}
 	var file apiFile
-	if err := f.upload(ctx, "/storage/upload", params, enc.FromStandardName(leaf), in, src, &file); err != nil {
+	if err := f.upload(ctx, "/storage/upload", params, enc.FromStandardName(leaf), in, src, &file, nil); err != nil {
 		return nil, err
 	}
 	// ponytail: upload reply has no updatedAt; now is within ms of it, and the
@@ -362,18 +374,26 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, err
 	}
 	var file apiFile
+	// updatedAt bumps on every write, so the revision guarding the second
+	// PATCH (rename) must be the one the first PATCH (move) just returned,
+	// not the value we started with - otherwise a real move always makes
+	// the following rename look stale and 409 spuriously.
+	rev := revisionOf(srcObj.modTime)
 	if srcDirID != dstDirID {
 		body := map[string]string{} // no folderId = root; the API rejects null
 		if dstDirID != rootID {
 			body["folderId"] = dstDirID
 		}
-		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id + "/move"}
+		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id + "/move", ExtraHeaders: map[string]string{"If-Match": rev}}
 		if _, err := f.srv.CallJSON(ctx, &opts, body, &file); err != nil {
 			return nil, err
 		}
+		if !file.UpdatedAt.IsZero() {
+			rev = revisionOf(file.UpdatedAt)
+		}
 	}
 	if srcLeaf != dstLeaf {
-		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id}
+		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id, ExtraHeaders: map[string]string{"If-Match": rev}}
 		if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, &file); err != nil {
 			return nil, err
 		}
@@ -484,16 +504,67 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	return resp.Body, nil
 }
 
+// conflictedCopyName mirrors the "name (conflicted copy <host> <date>).ext"
+// convention other sync clients use for a keep-both resolution.
+func conflictedCopyName(name string) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	return fmt.Sprintf("%s (conflicted copy %s %s)%s", base, host, time.Now().Format("2006-01-02"), ext)
+}
+
 // Update uploads new content as a version via POST /files/:id/version. The
 // server renames the file to the upload's filename, so send the current leaf.
+//
+// If-Match guards against a stale write (B3): a 409 means the remote file
+// changed since this object was last read, so the edit is kept as a new
+// sibling file ("keep both") instead of silently overwriting a change this
+// client never saw.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	var resp struct {
 		File apiFile `json:"file"`
 	}
-	if err := o.fs.upload(ctx, "/files/"+o.id+"/version", nil, enc.FromStandardName(path.Base(o.remote)), in, src, &resp); err != nil {
+	headers := map[string]string{"If-Match": revisionOf(o.modTime)}
+	err := o.fs.upload(ctx, "/files/"+o.id+"/version", nil, enc.FromStandardName(path.Base(o.remote)), in, src, &resp, headers)
+	if err == nil {
+		*o = *o.fs.newObject(o.remote, resp.File)
+		return nil
+	}
+	if !isConflict(err) {
 		return err
 	}
-	*o = *o.fs.newObject(o.remote, resp.File)
+	seeker, ok := in.(io.Seeker)
+	if !ok {
+		// ponytail: can't safely retry the write without a re-readable body
+		// (already consumed by the failed attempt above); surface the 409
+		// so the VFS keeps the local edit queued instead of silently
+		// dropping it. Add a buffering fallback if this proves common.
+		return err
+	}
+	if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
+		return err
+	}
+	leaf, dirID, fErr := o.fs.dirCache.FindPath(ctx, o.remote, false)
+	if fErr != nil {
+		return err
+	}
+	params := url.Values{}
+	if dirID != rootID {
+		params.Set("folderId", dirID)
+	}
+	var copyResp apiFile
+	name := conflictedCopyName(leaf)
+	if uErr := o.fs.upload(ctx, "/storage/upload", params, enc.FromStandardName(name), in, src, &copyResp, nil); uErr != nil {
+		return uErr
+	}
+	dir := path.Dir(o.remote)
+	if dir == "." {
+		dir = ""
+	}
+	o.fs.dirCache.FlushDir(dir)
 	return nil
 }
 
