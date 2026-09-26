@@ -64,3 +64,27 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - **macFUSE on Apple Silicon**: the classic kext backend requires lowering system security; newer macFUSE releases add an FSKit (user-space) backend on recent macOS — verify on the owner's Mac during M1.
 - **Explorer/Finder polish** is below OneDrive's (no native placeholder badges) — accepted trade-off for Approach D.
 - `POST /files/:id/version` and `/storage/upload` buffer uploads in memory (Multer) — large desktop writes must use the multipart path.
+
+## To-do (as of 2026-09-26, end of session)
+
+**Waiting on owner**
+- [ ] Merge backend PR #78 (missing stored object → 404, verified on staging), then run `ZDrive_Backend_CI`; then I verify production.
+- [ ] Test release **v0.2.0-m2** on Windows (Z: drive): create folder, drag files in, edit in Notepad, rename, delete; confirm on staging.zhdrive.in.
+- [ ] Test on Mac with `nfsmount` (no macFUSE).
+- [ ] Ask Navimatics about a commercial WinFsp licence (needed to bundle WinFsp in a paid closed-source installer).
+- [ ] Hire / assign a Qt 6 C++ Windows developer (blueprint: https://claude.ai/artifact/QQ51jr58bsTMbwe11z3DvB).
+- [ ] Attach the customer request for local-drive access (design doc Open Question 1).
+- [ ] Rotate the test-account password (it was shared in chat).
+
+**Next for Claude, in order**
+1. [ ] **B3 conflict check**: `If-Match: <revision>` on `POST /files/:id/version`, `PATCH /files/:id`, `PATCH /files/:id/move` → 409; client keeps both (`name (conflicted copy <host> <date>)`).
+2. [ ] **Office/editor saves**: temp-file-then-rename must become a new version of the original, not trash it; skip uploading `~$*`, `.~lock*`, `*.swp`, `.DS_Store`, `Thumbs.db`.
+3. [ ] **B4 device-code sign-in**: `/auth/device/start`, `/auth/device/poll`, web approval page `/device`, long-lived revocable session.
+4. [ ] **B5 minimum client version** (kill switch) and **B6 large uploads** via multipart `upload/initiate` + `upload/complete`.
+5. [ ] Quota full → `ENOSPC`; retries/pacer for 429/5xx.
+6. [ ] Backend: folder re-parenting (`PATCH /folders/:id {parentId}`) so DirMove is one call; trashed files orphaned when a folder is hard-deleted.
+7. [ ] M3: change feed, offline queue, pin files, telemetry. M4: tray app (Qt), installer, signing, auto-update, beta.
+
+**Parked (owner decision)**: infra storage split (MinIO off EC2).
+
+**Gotchas**: staging runs one PR branch at a time (last pushed wins); pre-2026-09-18 files exist in staging DB but not staging storage; never build in the shared production checkout; Go is at `~/.local/go/bin`.
