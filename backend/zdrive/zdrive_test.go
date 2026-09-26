@@ -35,6 +35,9 @@ func TestListAndRangeRead(t *testing.T) {
 			io.WriteString(w, `{"message":"Folder not found"}`)
 		}
 	})
+	mux.HandleFunc("/auth/me", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"storageUsed":"300","storageLimit":"1000"}`)
+	})
 	mux.HandleFunc("/files/f2/stream", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "b.txt", time.Time{}, strings.NewReader(content))
 	})
@@ -58,6 +61,11 @@ func TestListAndRangeRead(t *testing.T) {
 	}
 	if _, err := f.NewObject(ctx, "Nope/x"); err != fs.ErrorObjectNotFound {
 		t.Fatalf("missing path err = %v", err)
+	}
+
+	u, err := f.Features().About(ctx)
+	if err != nil || *u.Total != 1000 || *u.Used != 300 || *u.Free != 700 {
+		t.Fatalf("About = %+v, %v", u, err)
 	}
 
 	rc, err := o.Open(ctx, &fs.RangeOption{Start: 5, End: 9})

@@ -265,6 +265,22 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error { return errReadOnly }
 // Rmdir is not supported yet.
 func (f *Fs) Rmdir(ctx context.Context, dir string) error { return errReadOnly }
 
+// About reports the account's real quota (drive free space in Explorer/Finder).
+func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
+	var me struct {
+		StorageUsed  string `json:"storageUsed"`
+		StorageLimit string `json:"storageLimit"`
+	}
+	opts := rest.Opts{Method: "GET", Path: "/auth/me"}
+	if _, err := f.srv.CallJSON(ctx, &opts, nil, &me); err != nil {
+		return nil, err
+	}
+	used, _ := strconv.ParseInt(me.StorageUsed, 10, 64)
+	total, _ := strconv.ParseInt(me.StorageLimit, 10, 64)
+	free := max(total-used, 0)
+	return &fs.Usage{Total: &total, Used: &used, Free: &free}, nil
+}
+
 // Name of the remote.
 func (f *Fs) Name() string { return f.name }
 
@@ -337,6 +353,7 @@ func (o *Object) Remove(ctx context.Context) error { return errReadOnly }
 var (
 	_ fs.Fs              = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
+	_ fs.Abouter         = (*Fs)(nil)
 	_ dircache.DirCacher = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
