@@ -31,11 +31,11 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 
 ## Milestones
 
-### M0 — Backend foundations — B1 + B2 LIVE in production 2026-09-26; B3 opened as PR #79 (backend repo, normal PR → staging → merge flow), pending merge; B4 before beta
+### M0 — Backend foundations — B1 + B2 LIVE in production; B3 + B4 both opened as PRs (backend repo, normal PR → staging → merge flow), pending review
 - **B1** `GET /files/:id/stream` — Bearer-authenticated, honours `Range` (206 / `Content-Range` / `Accept-Ranges` / `ETag`), both encryption layouts + unencrypted. ← **first task**
 - **B2** Paginated listing: `GET /drive/list?folderId=&cursor=` → `{ folders, files, nextCursor }` with `id, name, size, updatedAt, revision`.
-- **B3** `If-Match` revision check on `POST /files/:id/version`, `PATCH /files/:id`, `PATCH /files/:id/move` → `409` on mismatch. **Backend done** (PR #79, `feat/desktop-conflict-check`, awaiting staging review + merge). Client (rclone backend) side not yet wired — see to-do.
-- **B4** Device-code login (`/auth/device/start`, `/auth/device/poll`, web approval page at `/device`) issuing a Session-backed, revocable, longer-lived token.
+- **B3** `If-Match` revision check on `POST /files/:id/version`, `PATCH /files/:id`, `PATCH /files/:id/move` → `409` on mismatch. **Backend + client both done** (PR #79, `feat/desktop-conflict-check`; client side in `zdrive.go`). Awaiting merge.
+- **B4** (2026-09-28, done) Device-code login: `POST /auth/device/start` + `/approve`/`/deny` + `/poll`, `/device` approval page (frontend PR #68), issuing a Session-backed, revocable, 90-day-default token (`DEVICE_SESSION_EXPIRES_IN`). Backend PR #80. Client: new `zdrive login` command (`cmd/login`) runs the flow and writes `type`/`url`/`token` straight into rclone's config file - `zdrive mount zdrive: ...` needs no env vars afterward. All three PRs (#79, #80, frontend #68) awaiting review/merge.
 
 ### M1 — Read-only mount — BUILT 2026-09-26, verified on Linux vs staging; awaiting Windows/Mac test
 - Go module: API client, token in OS keychain, config.
@@ -77,12 +77,14 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - [ ] Attach the customer request for local-drive access (design doc Open Question 1).
 - [ ] Rotate the test-account password (it was shared in chat).
 - [ ] **Backend PR #79 needs your review** (B3 conflict check, `feat/desktop-conflict-check`) — staging-verified, tests green, landing it into main is a human call this agent can't make on its own.
+- [ ] **Backend PR #80 needs your review** (B4 device-code sign-in, `feat/desktop-device-auth`) — same reason, staging-verified, tests green.
+- [ ] **Frontend PR #68 needs your review** (`/device` approval page, `feat/device-auth-approval`) — depends on PR #80 landing first to be testable end-to-end.
 
 **Next for Claude, in order**
 1. [x] **B3 conflict check, backend half**: `If-Match: <revision>` on `POST /files/:id/version`, `PATCH /files/:id`, `PATCH /files/:id/move` → 409. Shipped as PR #79.
 2. [x] **B3 conflict check, client half**: rclone backend (`backend/zdrive/zdrive.go`) sends `If-Match` on Update/Move; a stale Update gets a 409 and the edit is kept as a new file (`name (conflicted copy <host> <date>).ext`) instead of failing outright. A stale Move/rename just surfaces the 409 (no auto-copy - rare case, no data-loss risk since nothing was overwritten). Only takes effect against staging once PR #79 is on main - coded against what B3's backend contract will be, not yet tested against a live 409.
 3. [x] **Office/editor saves** (2026-09-28): lock/OS-metadata files (`~$*`, `.~lock.*#`, `*.swp`/`.swx`, `.DS_Store`, `Thumbs.db`, `desktop.ini`) never leave the local VFS cache (`syncSkip`). Write-temp-then-rename atomic saves recover as a new version of the original instead of trashing it (`Fs.Move`'s `recoverFromAtomicSave`, checks `GET /files/trash` for a same-name/-folder file trashed in the last 30s). Both covered by unit tests (`TestSyncSkip`, `TestMoveRecoversAtomicSave`); not yet exercised against a real editor on staging.
-4. [ ] **B4 device-code sign-in**: `/auth/device/start`, `/auth/device/poll`, web approval page `/device`, long-lived revocable session.
+4. [x] **B4 device-code sign-in** (2026-09-28): backend PR #80 + frontend PR #68 + new `zdrive login` CLI command (`cmd/login`, cross-compiles clean on all 4 targets) that runs the flow and writes the resulting token into rclone's own config file - no more manually copying a `zd_session` cookie. Covered by 4 Go tests against a fake server (approved-after-pending, denied, expired, start-fails), all mocking out real sleeps and the real config file. Not yet tested end-to-end against a live staging deploy (needs #79/#80/#68 merged first).
 5. [ ] **B5 minimum client version** (kill switch) and **B6 large uploads** via multipart `upload/initiate` + `upload/complete`.
 6. [ ] Quota full → `ENOSPC`; retries/pacer for 429/5xx.
 7. [ ] Backend: folder re-parenting (`PATCH /folders/:id {parentId}`) so DirMove is one call; trashed files orphaned when a folder is hard-deleted.
