@@ -29,3 +29,9 @@ Stop with Ctrl+C. Cache size: add `--vfs-cache-max-size 10G`.
 **Manual/CI alternative** (skip `login`, e.g. to test a specific short-lived `zd_session` cookie): set `RCLONE_CONFIG_ZDRIVE_TYPE=zdrive`, `RCLONE_CONFIG_ZDRIVE_URL=<api url>`, `RCLONE_CONFIG_ZDRIVE_TOKEN=<token>` before `mount`/`nfsmount` - env vars still take priority over the config file `login` writes.
 
 Note: on staging, files uploaded before the 2026-09-18 snapshot exist only in the DB, not in staging storage, so opening them fails. Upload fresh files to test content.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 ZennialHub Technologies - this open-source license covers only this client; the ZDrive backend/API it talks to is separate and closed-source. "ZDrive" and its logo are ZennialHub Technologies trademarks, not covered by the MIT license.
+
+This client is FLOSS specifically so it can use [WinFsp](https://winfsp.dev) (GPLv3, with a [FLOSS exception](https://github.com/winfsp/winfsp/blob/master/License.txt) for software that is itself under an OSI/FSF-approved license) on Windows without a paid commercial license - the exception requires the linking/distributing software to be genuinely open, which this now is.
