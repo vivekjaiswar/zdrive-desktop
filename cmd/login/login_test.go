@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 )
 
 // noSleep lets the polling loop run at full speed in tests - production
@@ -16,8 +18,10 @@ func noSleep(time.Duration) {}
 
 func TestDoLoginApprovedAfterPending(t *testing.T) {
 	polls := 0
+	var gotVersion string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/device/start", func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get("X-ZDrive-Client-Version")
 		io.WriteString(w, `{"deviceCode":"dc1","userCode":"AAAA-BBBB","expiresIn":60,"interval":1}`)
 	})
 	mux.HandleFunc("/auth/device/poll", func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +47,9 @@ func TestDoLoginApprovedAfterPending(t *testing.T) {
 	}
 	if polls < 2 {
 		t.Fatalf("polls = %d, want at least 2 (one pending, one approved)", polls)
+	}
+	if gotVersion != zdrive.ClientVersion {
+		t.Fatalf("X-ZDrive-Client-Version = %q, want %q", gotVersion, zdrive.ClientVersion)
 	}
 }
 

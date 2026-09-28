@@ -382,3 +382,89 @@ func TestMoveRecoversAtomicSave(t *testing.T) {
 		t.Fatal("the leftover temp object should have been discarded")
 	}
 }
+
+// TestPutLarge: the presigned-multipart flow (B6) - initiate, PUT the part
+// directly to the presigned URL (not through the API server), complete.
+// Calls putLarge directly rather than through Put() so the test payload
+// doesn't need to cross the real 50MB/16MB thresholds to exercise it - the
+// server's response shape is what's under test, not the byte counts.
+func TestPutLarge(t *testing.T) {
+	const content = "large file content"
+	var calls []string
+	var partBody []byte
+
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/storage/upload/initiate", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "initiate")
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"contentHash"`) {
+			t.Fatalf("initiate body missing contentHash: %s", body)
+		}
+		io.WriteString(w, `{"uploadId":"up1","key":"k1","parts":[{"partNumber":1,"url":"`+srvURL+`/fake-s3-part"}]}`)
+	})
+	mux.HandleFunc("/fake-s3-part", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "part-put")
+		partBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("ETag", `"part1etag"`)
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/storage/upload/complete", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "complete")
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `part1etag`) {
+			t.Fatalf("complete body missing the part's etag: %s", body)
+		}
+		io.WriteString(w, `{"id":"f-large","name":"video.mp4","size":19,"folderId":null}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	obj, ok, err := f.(*Fs).putLarge(ctx, strings.NewReader(content), object.NewStaticObjectInfo("video.mp4", time.Now(), int64(len(content)), true, nil, nil), "video.mp4", rootID)
+	if !ok {
+		t.Fatal("putLarge returned ok=false for a seekable reader")
+	}
+	if err != nil {
+		t.Fatalf("putLarge = %v", err)
+	}
+	if obj.(*Object).id != "f-large" {
+		t.Fatalf("result id = %q", obj.(*Object).id)
+	}
+	if string(partBody) != content {
+		t.Fatalf("uploaded part body = %q, want %q", partBody, content)
+	}
+	want := []string{"initiate", "part-put", "complete"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+// TestClientVersionHeader: B5's kill switch depends entirely on this header
+// actually reaching the server - confirm it's sent, not just wired up.
+func TestClientVersionHeader(t *testing.T) {
+	var gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get("X-ZDrive-Client-Version")
+		io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.List(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != ClientVersion {
+		t.Fatalf("X-ZDrive-Client-Version = %q, want %q", gotVersion, ClientVersion)
+	}
+}

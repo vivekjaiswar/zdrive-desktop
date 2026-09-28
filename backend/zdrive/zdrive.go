@@ -4,7 +4,10 @@
 package zdrive
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,8 +36,23 @@ import (
 
 const rootID = "root"
 
+// ClientVersion is sent as X-ZDrive-Client-Version on every request (B5).
+// The backend's kill switch (MIN_DESKTOP_CLIENT_VERSION) compares against
+// this to block versions known to be broken/unsafe - bump on every release
+// that changes wire-visible behavior.
+const ClientVersion = "0.3.0"
+
 // ZDrive names may contain anything; encode only what can't be a path segment.
 const enc = encoder.Standard
+
+// Must match the backend's LARGE_UPLOAD_MIN_SIZE_BYTES / MULTIPART_PART_SIZE_BYTES
+// defaults (storage.service.ts) - the server computes exactly
+// ceil(size/multipartPartBytes) presigned part URLs, so the client's part
+// size has to match, not just be "close enough".
+const (
+	largeUploadMinBytes = 50 * 1024 * 1024
+	multipartPartBytes  = 16 * 1024 * 1024
+)
 
 // syncSkip reports whether leaf is an editor lock/swap file or OS metadata
 // that should live only in the local VFS cache and never sync remotely.
@@ -159,6 +177,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		srv: rest.NewClient(fshttp.NewClient(ctx)).
 			SetRoot(strings.TrimRight(opt.URL, "/")).
 			SetHeader("Authorization", "Bearer "+opt.Token).
+			SetHeader("X-ZDrive-Client-Version", ClientVersion).
 			SetErrorHandler(errorHandler),
 	}
 	f.features = (&fs.Features{
@@ -331,7 +350,10 @@ func (f *Fs) upload(ctx context.Context, apiPath string, params url.Values, name
 	return err
 }
 
-// Put uploads a new file via POST /storage/upload.
+// Put uploads a new file via POST /storage/upload, or via the presigned
+// multipart flow (B6) once the file crosses largeUploadMinBytes - matches
+// the backend's own LARGE_UPLOAD_MIN_SIZE_BYTES default (50MB), below
+// which the simple path is both simpler and genuinely cheaper server-side.
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	leaf, dirID, err := f.dirCache.FindPath(ctx, src.Remote(), true)
 	if err != nil {
@@ -340,6 +362,14 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	if syncSkip(leaf) {
 		_, _ = io.Copy(io.Discard, in) // drain so the VFS write-back doesn't block on us
 		return f.newSkippedObject(src.Remote()), nil
+	}
+	if src.Size() >= largeUploadMinBytes {
+		if obj, ok, err := f.putLarge(ctx, in, src, leaf, dirID); ok {
+			return obj, err
+		}
+		// putLarge returned before touching in (only possible when it
+		// isn't seekable, which --vfs-cache-mode full always avoids in
+		// practice) - safe to fall through to the simple upload below.
 	}
 	params := url.Values{}
 	if dirID != rootID {
@@ -353,6 +383,95 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	// next listing corrects it (costs at most one cache re-fetch).
 	file.UpdatedAt = time.Now()
 	return f.newObject(src.Remote(), file), nil
+}
+
+// putLarge implements B6: uploads via POST /storage/upload/initiate, then
+// PUTs each part directly to presigned storage URLs (the file never
+// round-trips through the API server's own request body), then finalizes
+// via POST /storage/upload/complete. The bool return is whether putLarge
+// actually ran (false only when in isn't seekable, so the caller knows not
+// to also try the fallback path against an already-drained reader).
+func (f *Fs) putLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo, leaf, dirID string) (fs.Object, bool, error) {
+	seeker, ok := in.(io.Seeker)
+	if !ok {
+		return nil, false, nil
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, in); err != nil {
+		return nil, true, err
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return nil, true, err
+	}
+	contentHash := hex.EncodeToString(hasher.Sum(nil))
+
+	body := map[string]any{
+		"name":        enc.FromStandardName(leaf),
+		"size":        src.Size(),
+		"mimeType":    fs.MimeType(ctx, src),
+		"contentHash": contentHash,
+	}
+	if dirID != rootID {
+		body["folderId"] = dirID
+	}
+	var init struct {
+		UploadID string `json:"uploadId"`
+		Parts    []struct {
+			PartNumber int    `json:"partNumber"`
+			URL        string `json:"url"`
+		} `json:"parts"`
+	}
+	initOpts := rest.Opts{Method: "POST", Path: "/storage/upload/initiate"}
+	if _, err := f.srv.CallJSON(ctx, &initOpts, body, &init); err != nil {
+		return nil, true, err
+	}
+
+	completedParts := make([]map[string]any, 0, len(init.Parts))
+	buf := make([]byte, multipartPartBytes)
+	for _, part := range init.Parts {
+		n, err := io.ReadFull(in, buf)
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, true, err
+		}
+		etag, err := putPart(ctx, part.URL, buf[:n])
+		if err != nil {
+			return nil, true, err
+		}
+		completedParts = append(completedParts, map[string]any{"partNumber": part.PartNumber, "etag": etag})
+	}
+
+	var file apiFile
+	completeOpts := rest.Opts{Method: "POST", Path: "/storage/upload/complete"}
+	completeBody := map[string]any{"uploadId": init.UploadID, "parts": completedParts}
+	if _, err := f.srv.CallJSON(ctx, &completeOpts, completeBody, &file); err != nil {
+		return nil, true, err
+	}
+	file.UpdatedAt = time.Now() // ponytail: complete's reply has no updatedAt either, same as the simple path
+	return f.newObject(src.Remote(), file), true, nil
+}
+
+// putPart PUTs one part directly to a presigned storage URL (bypassing
+// f.srv - these URLs carry their own auth, not our Bearer token) and
+// returns the ETag the multipart complete step needs to identify it.
+func putPart(ctx context.Context, url string, data []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.ContentLength = int64(len(data))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("upload part failed: status %d", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return "", errors.New("upload part response had no ETag header")
+	}
+	return etag, nil
 }
 
 // Mkdir creates dir and any missing parents.

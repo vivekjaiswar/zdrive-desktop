@@ -19,6 +19,7 @@ import (
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/spf13/cobra"
+	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 )
 
 var apiURL string
@@ -76,6 +77,7 @@ func postJSON(ctx context.Context, url string, body, out any) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ZDrive-Client-Version", zdrive.ClientVersion)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, err
