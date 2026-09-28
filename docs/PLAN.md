@@ -14,6 +14,7 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 | Background auth (design OQ4) | Client sends `Authorization: Bearer` to a new Range-capable stream endpoint — no 60 s ticket involved. Long-lived login via device-code flow (B4, before beta; M1 testing uses the `zd_session` cookie). |
 | Demand evidence (design OQ1) | Owner chose to proceed with the build; attach the ticket when available. |
 | Client shell (2026-09-26, revised) | **No Qt tray GUI app.** The downloaded exe auto-mounts the drive on run (background process, minimal or no tray icon — just enough for quit/status). All account management (usage, devices, sharing, billing) stays in the existing web app and mobile app — one codebase to maintain instead of Qt C++ + web + mobile. Same principle on iOS: the mobile app is the management surface; a Files-app mount still needs a native File Provider Extension (unavoidable on iOS), but it carries no separate account-management UI. **Kills the "hire a Qt 6 C++ developer" line item entirely.** |
+| WinFsp licensing (2026-09-28) | This repo (and `zdrive-mobile`) are now **open-sourced under MIT** (owner retains copyright/trademark - only the license grant to others changed, backend/API stays closed) specifically so WinFsp's GPLv3 FLOSS exception applies: bundling + silently auto-installing WinFsp in a real installer no longer needs WinFsp's $6,000/3yr commercial license. Verified via the actual license text, not assumed - see README. No architecture change: still rclone + WinFsp (Approach D), same as before. |
 
 ## Hard scale rules (from the design)
 
@@ -72,7 +73,7 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - [x] Backend PR #78 (missing stored object → 404) — landed on main, verified live in production.
 - [x] Test release **v0.2.0-m2** on Windows (Z: drive): create folder, drag files in, edit in Notepad, rename, delete — done, confirmed against staging.zhdrive.in (real DB rows verified, not just self-report).
 - [ ] Test on Mac with `nfsmount` (no macFUSE).
-- [ ] Ask Navimatics about a commercial WinFsp licence (needed to bundle WinFsp in a paid closed-source installer).
+- ~~[ ] Ask Navimatics about a commercial WinFsp licence~~ — **moot as of 2026-09-28**: this repo is now MIT-licensed, which qualifies for WinFsp's GPLv3 FLOSS exception (free) instead of the $6,000/3yr commercial license.
 - ~~[ ] Hire / assign a Qt 6 C++ Windows developer~~ — **dropped 2026-09-26**: no Qt shell, see Decisions table above.
 - [ ] Attach the customer request for local-drive access (design doc Open Question 1).
 - [ ] Rotate the test-account password (it was shared in chat).
