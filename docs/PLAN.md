@@ -49,7 +49,7 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - `mkdir`, `create`, `rename`/move, `unlink` (→ trash, recoverable), `rmdir`.
 - Write-back: edits go to a local staging file; on close, upload (new file → upload, existing → new version with `If-Match`).
 - Conflict: server `409` → keep both, local copy saved as `name (conflicted copy <host> <date>).ext`.
-- Editor save patterns: ignore lock/temp files (`~$*`, `.~lock*`, `*.swp`, `.DS_Store`, `Thumbs.db`); handle write-temp-then-rename atomic saves.
+- Editor save patterns (2026-09-28, done): lock/OS-metadata files (`~$*`, `.~lock.*#`, `*.swp`/`.swx`, `.DS_Store`, `Thumbs.db`, `desktop.ini`) are local-only, never uploaded (`syncSkip`) - confirmed rclone's own `--exclude` filtering does NOT reach mount's read/write path (sync/copy-only), so this has to live in the backend, not as a documented mount flag. Write-temp-then-rename atomic saves: rclone's own move helper deletes the destination before renaming the temp file onto its name (traced in vendored rclone source, `fs/operations/operations.go` `move()`); recovered in `Fs.Move` by checking `GET /files/trash` for a same-name, same-folder file trashed in the last 30s and, if found, restoring it and uploading the temp content as its next version instead of letting the temp object take over the name.
 - Large files via existing multipart `upload/initiate` + `upload/complete`.
 - Quota exceeded → `ENOSPC`.
 
@@ -66,22 +66,22 @@ Source design: `~/.gstack/projects/zennial-drive/ubuntu-multi-tenant-vision-desi
 - **Explorer/Finder polish** is below OneDrive's (no native placeholder badges) — accepted trade-off for Approach D.
 - `POST /files/:id/version` and `/storage/upload` buffer uploads in memory (Multer) — large desktop writes must use the multipart path.
 
-## To-do (as of 2026-09-26, updated)
+## To-do (as of 2026-09-28, updated)
 
 **Waiting on owner**
-- [x] Merge backend PR #78 (missing stored object → 404) — merged + verified live in production.
+- [x] Backend PR #78 (missing stored object → 404) — landed on main, verified live in production.
 - [x] Test release **v0.2.0-m2** on Windows (Z: drive): create folder, drag files in, edit in Notepad, rename, delete — done, confirmed against staging.zhdrive.in (real DB rows verified, not just self-report).
 - [ ] Test on Mac with `nfsmount` (no macFUSE).
 - [ ] Ask Navimatics about a commercial WinFsp licence (needed to bundle WinFsp in a paid closed-source installer).
 - ~~[ ] Hire / assign a Qt 6 C++ Windows developer~~ — **dropped 2026-09-26**: no Qt shell, see Decisions table above.
 - [ ] Attach the customer request for local-drive access (design doc Open Question 1).
 - [ ] Rotate the test-account password (it was shared in chat).
-- [ ] Review + merge backend PR #79 (B3 conflict check, `feat/desktop-conflict-check`) once staging looks good.
+- [ ] **Backend PR #79 needs your review** (B3 conflict check, `feat/desktop-conflict-check`) — staging-verified, tests green, landing it into main is a human call this agent can't make on its own.
 
 **Next for Claude, in order**
 1. [x] **B3 conflict check, backend half**: `If-Match: <revision>` on `POST /files/:id/version`, `PATCH /files/:id`, `PATCH /files/:id/move` → 409. Shipped as PR #79.
-2. [x] **B3 conflict check, client half**: rclone backend (`backend/zdrive/zdrive.go`) sends `If-Match` on Update/Move; a stale Update gets a 409 and the edit is kept as a new file (`name (conflicted copy <host> <date>).ext`) instead of failing outright. A stale Move/rename just surfaces the 409 (no auto-copy - rare case, no data-loss risk since nothing was overwritten). Needs the client to actually be pointed at PR #79 once it's merged - this is coded against what B3's backend contract will be, not yet tested against a live 409 from staging.
-3. [ ] **Office/editor saves**: temp-file-then-rename must become a new version of the original, not trash it; skip uploading `~$*`, `.~lock*`, `*.swp`, `.DS_Store`, `Thumbs.db`.
+2. [x] **B3 conflict check, client half**: rclone backend (`backend/zdrive/zdrive.go`) sends `If-Match` on Update/Move; a stale Update gets a 409 and the edit is kept as a new file (`name (conflicted copy <host> <date>).ext`) instead of failing outright. A stale Move/rename just surfaces the 409 (no auto-copy - rare case, no data-loss risk since nothing was overwritten). Only takes effect against staging once PR #79 is on main - coded against what B3's backend contract will be, not yet tested against a live 409.
+3. [x] **Office/editor saves** (2026-09-28): lock/OS-metadata files (`~$*`, `.~lock.*#`, `*.swp`/`.swx`, `.DS_Store`, `Thumbs.db`, `desktop.ini`) never leave the local VFS cache (`syncSkip`). Write-temp-then-rename atomic saves recover as a new version of the original instead of trashing it (`Fs.Move`'s `recoverFromAtomicSave`, checks `GET /files/trash` for a same-name/-folder file trashed in the last 30s). Both covered by unit tests (`TestSyncSkip`, `TestMoveRecoversAtomicSave`); not yet exercised against a real editor on staging.
 4. [ ] **B4 device-code sign-in**: `/auth/device/start`, `/auth/device/poll`, web approval page `/device`, long-lived revocable session.
 5. [ ] **B5 minimum client version** (kill switch) and **B6 large uploads** via multipart `upload/initiate` + `upload/complete`.
 6. [ ] Quota full → `ENOSPC`; retries/pacer for 429/5xx.

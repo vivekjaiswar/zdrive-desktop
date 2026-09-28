@@ -236,3 +236,149 @@ func TestUpdateConflict(t *testing.T) {
 		t.Fatal("conflicted copy was never uploaded")
 	}
 }
+
+// TestSyncSkip: editor lock files and OS metadata never reach the API - the
+// object is a purely local placeholder, and Update/Remove on it are no-ops.
+func TestSyncSkip(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"~$resume.docx", ".~lock.notes.odt#", "vim.txt.swp", ".DS_Store", "Thumbs.db"} {
+		o, err := f.Put(ctx, strings.NewReader("junk"), object.NewStaticObjectInfo(name, time.Now(), 4, true, nil, nil))
+		if err != nil {
+			t.Fatalf("Put(%q) = %v", name, err)
+		}
+		if err := o.Update(ctx, strings.NewReader("more junk"), object.NewStaticObjectInfo(name, time.Now(), 9, true, nil, nil)); err != nil {
+			t.Fatalf("Update(%q) = %v", name, err)
+		}
+		if err := o.Remove(ctx); err != nil {
+			t.Fatalf("Remove(%q) = %v", name, err)
+		}
+	}
+	if hit {
+		t.Fatal("a syncSkip file reached the API")
+	}
+}
+
+// TestMoveRecoversAtomicSave: an editor's atomic save (write temp, rename
+// over the original) must become a new version of the original file, not a
+// trashed original plus a fresh file wearing its name. This replays exactly
+// what rclone's own move helper does: delete the destination, then call our
+// Move - Remove() here stands in for that delete.
+func TestMoveRecoversAtomicSave(t *testing.T) {
+	type rec struct {
+		Name      string
+		FolderID  *string
+		DeletedAt *time.Time
+		Content   string
+	}
+	files := map[string]*rec{}
+	nextID := 0
+	var calls []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch {
+		case r.URL.Path == "/drive/list":
+			io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`)
+		case r.URL.Path == "/storage/upload":
+			r.ParseMultipartForm(1 << 20)
+			fh := r.MultipartForm.File["file"][0]
+			part, _ := fh.Open()
+			body, _ := io.ReadAll(part)
+			nextID++
+			id := fmt.Sprintf("f%d", nextID)
+			files[id] = &rec{Name: fh.Filename, Content: string(body)}
+			fmt.Fprintf(w, `{"id":%q,"name":%q,"size":%d}`, id, fh.Filename, len(body))
+		case strings.HasSuffix(r.URL.Path, "/stream"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/stream")
+			io.WriteString(w, files[id].Content)
+		case strings.HasSuffix(r.URL.Path, "/version"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/version")
+			r.ParseMultipartForm(1 << 20)
+			fh := r.MultipartForm.File["file"][0]
+			part, _ := fh.Open()
+			body, _ := io.ReadAll(part)
+			files[id].Content = string(body)
+			files[id].Name = fh.Filename
+			fmt.Fprintf(w, `{"file":{"id":%q,"name":%q,"size":%d,"updatedAt":"2026-09-28T12:00:00Z"}}`, id, fh.Filename, len(body))
+		case strings.HasSuffix(r.URL.Path, "/restore"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/restore")
+			files[id].DeletedAt = nil
+		case r.URL.Path == "/files/trash":
+			io.WriteString(w, `[`)
+			first := true
+			for id, rc := range files {
+				if rc.DeletedAt == nil {
+					continue
+				}
+				if !first {
+					io.WriteString(w, ",")
+				}
+				first = false
+				fmt.Fprintf(w, `{"id":%q,"name":%q,"folderId":null,"deletedAt":%q}`, id, rc.Name, rc.DeletedAt.Format(time.RFC3339))
+			}
+			io.WriteString(w, `]`)
+		case r.Method == "DELETE":
+			id := strings.TrimPrefix(r.URL.Path, "/files/")
+			now := time.Now()
+			files[id].DeletedAt = &now
+			io.WriteString(w, `{}`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := f.Put(ctx, strings.NewReader("v1"), object.NewStaticObjectInfo("resume.txt", time.Now(), 2, true, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origID := orig.(*Object).id
+
+	if err := orig.Remove(ctx); err != nil { // stands in for operations.Move's delete-before-overwrite
+		t.Fatal(err)
+	}
+
+	tmp, err := f.Put(ctx, strings.NewReader("v2 edited"), object.NewStaticObjectInfo("resume.tmp", time.Now(), 9, true, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpID := tmp.(*Object).id
+
+	result, err := f.Features().Move(ctx, tmp, "resume.txt")
+	if err != nil {
+		t.Fatalf("Move = %v", err)
+	}
+	if result.(*Object).id != origID {
+		t.Fatalf("Move result id = %q, want the original's id %q (identity/version history must survive)", result.(*Object).id, origID)
+	}
+	if result.Remote() != "resume.txt" {
+		t.Fatalf("Move result remote = %q", result.Remote())
+	}
+	if files[origID].Content != "v2 edited" {
+		t.Fatalf("original's content = %q, want the edited content", files[origID].Content)
+	}
+	if files[origID].DeletedAt != nil {
+		t.Fatal("original should have been restored, not left trashed")
+	}
+	if files[tmpID].DeletedAt == nil {
+		t.Fatal("the leftover temp object should have been discarded")
+	}
+}

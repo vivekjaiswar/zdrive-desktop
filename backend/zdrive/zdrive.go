@@ -25,6 +25,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/rest"
@@ -34,6 +35,22 @@ const rootID = "root"
 
 // ZDrive names may contain anything; encode only what can't be a path segment.
 const enc = encoder.Standard
+
+// syncSkip reports whether leaf is an editor lock/swap file or OS metadata
+// that should live only in the local VFS cache and never sync remotely.
+// rclone's own --exclude filtering doesn't reach mount's read/write path
+// (it's a sync/copy-only mechanism), so this has to live in the backend.
+func syncSkip(leaf string) bool {
+	switch {
+	case strings.HasPrefix(leaf, "~$"): // Office lock file
+	case strings.HasPrefix(leaf, ".~lock.") && strings.HasSuffix(leaf, "#"): // LibreOffice lock file
+	case strings.HasSuffix(leaf, ".swp"), strings.HasSuffix(leaf, ".swx"): // vim swap
+	case leaf == ".DS_Store", leaf == "Thumbs.db", leaf == "desktop.ini":
+	default:
+		return false
+	}
+	return true
+}
 
 func init() {
 	fs.Register(&fs.RegInfo{
@@ -246,6 +263,13 @@ func (f *Fs) newObject(remote string, file apiFile) *Object {
 	return &Object{fs: f, remote: remote, id: file.ID, size: size, modTime: file.UpdatedAt}
 }
 
+// newSkippedObject represents a syncSkip file: it exists only in the local
+// VFS cache (id "") and is never read from or written to the API. Object
+// methods check for the empty id and no-op instead of calling the backend.
+func (f *Fs) newSkippedObject(remote string) *Object {
+	return &Object{fs: f, remote: remote, modTime: time.Now()}
+}
+
 // NewObject finds the file at remote.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	leaf, dirID, err := f.dirCache.FindPath(ctx, remote, false)
@@ -313,6 +337,10 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	if err != nil {
 		return nil, err
 	}
+	if syncSkip(leaf) {
+		_, _ = io.Copy(io.Discard, in) // drain so the VFS write-back doesn't block on us
+		return f.newSkippedObject(src.Remote()), nil
+	}
 	params := url.Values{}
 	if dirID != rootID {
 		params.Set("folderId", dirID)
@@ -360,10 +388,24 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 }
 
 // Move moves and/or renames a file: PATCH /files/:id/move then PATCH /files/:id.
+//
+// A same-folder rename onto an existing name is how an atomic editor save
+// looks by the time it reaches us: write a temp file, then rename it over
+// the original. rclone's own move helper (operations.Move) deletes the
+// destination object first, then renames the temp file onto its name - so
+// without help here, the original file's identity and version history
+// would be silently replaced by the temp upload. Recover: if a file was
+// JUST trashed under the destination name, treat this as "the temp content
+// is a new version of the original" - restore it, upload as its next
+// version, and discard the temp object - instead of letting the rename
+// finish creating a fresh file with no history under the old name.
 func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
 		return nil, fs.ErrorCantMove
+	}
+	if srcObj.id == "" { // syncSkip file (lock/swap/OS metadata) - never touches the API
+		return f.newSkippedObject(remote), nil
 	}
 	srcLeaf, srcDirID, err := srcObj.fs.dirCache.FindPath(ctx, srcObj.remote, false)
 	if err != nil {
@@ -372,6 +414,15 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	dstLeaf, dstDirID, err := f.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return nil, err
+	}
+	if srcDirID == dstDirID {
+		recovered, rErr := f.recoverFromAtomicSave(ctx, srcObj, dstDirID, dstLeaf, remote)
+		if rErr != nil {
+			return nil, rErr
+		}
+		if recovered != nil {
+			return recovered, nil
+		}
 	}
 	var file apiFile
 	// updatedAt bumps on every write, so the revision guarding the second
@@ -403,6 +454,72 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		dst.modTime = file.UpdatedAt
 	}
 	return dst, nil
+}
+
+// trashRecoveryWindow bounds how recent a trashed file must be to count as
+// "rclone just deleted this for us" rather than an unrelated earlier delete.
+const trashRecoveryWindow = 30 * time.Second
+
+// recoverFromAtomicSave checks whether a file named dstLeaf in dstDirID was
+// trashed within trashRecoveryWindow - not our doing, but rclone's own
+// delete-before-overwrite move helper - and if so restores it and uploads
+// srcObj's content as its next version. Returns (nil, nil) when there's
+// nothing to recover, so the caller falls through to an ordinary rename.
+func (f *Fs) recoverFromAtomicSave(ctx context.Context, srcObj *Object, dstDirID, dstLeaf, remote string) (fs.Object, error) {
+	var trash []struct {
+		ID        string     `json:"id"`
+		Name      string     `json:"name"`
+		FolderID  *string    `json:"folderId"`
+		DeletedAt *time.Time `json:"deletedAt"`
+	}
+	opts := rest.Opts{Method: "GET", Path: "/files/trash"}
+	if _, err := f.srv.CallJSON(ctx, &opts, nil, &trash); err != nil {
+		return nil, nil // best-effort: a lookup failure just falls back to an ordinary rename
+	}
+	wantFolder := dstDirID
+	if wantFolder == rootID {
+		wantFolder = ""
+	}
+	for _, t := range trash {
+		folder := ""
+		if t.FolderID != nil {
+			folder = *t.FolderID
+		}
+		if enc.ToStandardName(t.Name) != dstLeaf || folder != wantFolder {
+			continue
+		}
+		if t.DeletedAt == nil || time.Since(*t.DeletedAt) > trashRecoveryWindow {
+			continue
+		}
+		return f.replaceWithVersion(ctx, t.ID, srcObj, remote)
+	}
+	return nil, nil
+}
+
+// replaceWithVersion restores originalID and uploads srcObj's content as its
+// next version, then discards srcObj's own (now-superfluous) object.
+func (f *Fs) replaceWithVersion(ctx context.Context, originalID string, srcObj *Object, remote string) (fs.Object, error) {
+	restoreOpts := rest.Opts{Method: "PATCH", Path: "/files/" + originalID + "/restore"}
+	if _, err := f.srv.CallJSON(ctx, &restoreOpts, nil, nil); err != nil {
+		return nil, err
+	}
+	rc, err := srcObj.Open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	// A fs.ObjectInfo with the DESTINATION remote, not srcObj's temp name -
+	// content-type detection is by extension, and the temp name's is wrong.
+	info := object.NewStaticObjectInfo(remote, srcObj.modTime, srcObj.size, true, nil, nil)
+	var resp struct {
+		File apiFile `json:"file"`
+	}
+	name := path.Base(remote)
+	if err := f.upload(ctx, "/files/"+originalID+"/version", nil, enc.FromStandardName(name), rc, info, &resp, nil); err != nil {
+		return nil, err
+	}
+	_ = srcObj.Remove(ctx) // best-effort cleanup of the now-orphaned temp object
+	return f.newObject(remote, resp.File), nil
 }
 
 // DirMove renames a folder in place. The folders API has no re-parenting
@@ -495,6 +612,9 @@ func (o *Object) SetModTime(ctx context.Context, t time.Time) error { return fs.
 
 // Open streams the file, honouring Range/Seek options via GET /files/:id/stream.
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
+	if o.id == "" { // syncSkip file - never existed remotely
+		return io.NopCloser(strings.NewReader("")), nil
+	}
 	fs.FixRangeOption(options, o.size)
 	opts := rest.Opts{Method: "GET", Path: "/files/" + o.id + "/stream", Options: options}
 	resp, err := o.fs.srv.Call(ctx, &opts)
@@ -524,6 +644,10 @@ func conflictedCopyName(name string) string {
 // sibling file ("keep both") instead of silently overwriting a change this
 // client never saw.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	if o.id == "" { // syncSkip file - stays local-only
+		_, _ = io.Copy(io.Discard, in)
+		return nil
+	}
 	var resp struct {
 		File apiFile `json:"file"`
 	}
@@ -570,6 +694,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 // Remove moves the file to trash (DELETE /files/:id is a soft delete).
 func (o *Object) Remove(ctx context.Context) error {
+	if o.id == "" { // syncSkip file - nothing remote to remove
+		return nil
+	}
 	opts := rest.Opts{Method: "DELETE", Path: "/files/" + o.id}
 	_, err := o.fs.srv.CallJSON(ctx, &opts, nil, nil)
 	return err
