@@ -1,5 +1,9 @@
 name: build
 on: [push, workflow_dispatch]
+env:
+  # Bump when a newer WinFsp release is wanted - installer/windows never
+  # needs to change, it just takes the filename as a build parameter.
+  WINFSP_VERSION: "2.1.25156"
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,5 +17,23 @@ jobs:
           GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o dist/zdrive-macos-arm64 .
           GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-macos-amd64 .
           GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-linux-amd64 .
+      # A single-file Windows installer: bundles WinFsp and silently installs
+      # it only if missing, so a user only ever downloads one exe (no
+      # separate WinFsp download/install step). See installer/windows for why
+      # this is legally free to bundle (this repo's own MIT license).
+      - name: Build Windows installer (bundles WinFsp)
+        run: |
+          sudo apt-get update && sudo apt-get install -y nsis
+          curl -fsSL -o dist/winfsp.msi \
+            "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-${WINFSP_VERSION}.msi"
+          # NSIS File paths resolve relative to the .nsi script's own
+          # directory, not the invocation cwd - pass absolute paths so this
+          # works regardless of where makensis is run from.
+          makensis \
+            -DWINFSP_MSI="$PWD/dist/winfsp.msi" \
+            -DZDRIVE_EXE="$PWD/dist/zdrive-windows-amd64.exe" \
+            installer/windows/zdrive-installer.nsi
+          mv installer/windows/zdrive-windows-setup.exe dist/
+          rm dist/winfsp.msi
       - uses: actions/upload-artifact@v4
         with: { name: zdrive-binaries, path: dist/ }

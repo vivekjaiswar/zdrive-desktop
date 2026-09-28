@@ -6,23 +6,21 @@ Mounts your ZDrive as a local drive. Files download on demand, by byte range, an
 
 ## Try it
 
-1. Download `zdrive-binaries` from the latest run in the repo's **Actions** tab.
-2. Sign in once: `./zdrive-<platform> login` (add `--url https://staging.zhdrive.in/api` to test against staging instead of production). Prints a code, opens a browser to approve it - approve there, and the resulting session is saved into rclone's own config, so no env vars or manual token-copying are needed afterward.
-3. Mount:
-
-**Windows** (install [WinFsp](https://winfsp.dev) first), PowerShell:
+**Windows**: download `zdrive-windows-setup.exe` from the latest run in the repo's **Actions** tab and run it - it installs WinFsp automatically (only if not already present, silently, no separate download from anywhere else) and offers to sign in right on the finish page. Then, PowerShell:
 ```powershell
-.\zdrive-windows-amd64.exe login
-.\zdrive-windows-amd64.exe mount zdrive: Z: --vfs-cache-mode full
+zdrive-windows-amd64.exe mount zdrive: Z: --vfs-cache-mode full
 ```
+(Sign in again anytime from the Start Menu shortcut, or `zdrive-windows-amd64.exe login`.)
 
-**macOS** (no macFUSE needed: uses the built-in NFS client), Terminal:
+**macOS** (no macFUSE needed: uses the built-in NFS client): download `zdrive-binaries` from the same Actions run, Terminal:
 ```sh
 xattr -d com.apple.quarantine ./zdrive-macos-arm64; chmod +x ./zdrive-macos-arm64
 ./zdrive-macos-arm64 login
 mkdir -p ~/ZDrive && ./zdrive-macos-arm64 nfsmount zdrive: ~/ZDrive --vfs-cache-mode full
 ```
 (Intel Mac: use `zdrive-macos-amd64`.)
+
+`login` prints a code, opens a browser to approve it - approve there, and the resulting session is saved into rclone's own config, so no env vars or manual token-copying are needed afterward. `--url https://staging.zhdrive.in/api` on `login` tests against staging instead of production.
 
 Stop with Ctrl+C. Cache size: add `--vfs-cache-max-size 10G`.
 
