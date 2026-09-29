@@ -156,6 +156,55 @@ func isConflict(err error) bool {
 	return errors.As(err, &e) && e.Status == http.StatusConflict
 }
 
+// isRetriable reports whether err is a transient failure worth retrying:
+// 429 (rate limited - the server explicitly rejected the request, nothing
+// was processed) or a 5xx. Deliberately excludes every other 4xx (400,
+// 401, 403, 404, 409, ...) - retrying those can't fix anything, they're
+// telling us the request itself was wrong, not that timing was bad.
+func isRetriable(err error) bool {
+	var e *apiError
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Status == http.StatusTooManyRequests || e.Status >= 500
+}
+
+// var, not const, so tests can shrink retryBaseDelay to exercise the full
+// retry-exhaustion path without a real multi-second test.
+var (
+	maxRetries     = 5
+	retryBaseDelay = 500 * time.Millisecond
+)
+
+// withRetry calls fn, retrying with exponential backoff (base * 2^attempt)
+// on transient errors up to maxRetries times. Deliberately used only at
+// call sites that are safe to repeat - a plain read, an S3 multipart part
+// PUT (idempotent by design: re-uploading the same part number just
+// overwrites it), or a call the server itself protects against duplicate
+// effects (the multipart complete steps, guarded by PendingUpload's own
+// status tracking). Never wraps a write with no such protection - a lost
+// response after a real write must surface as an error, not risk being
+// silently repeated into a duplicate.
+func withRetry(ctx context.Context, fn func() error) error {
+	var err error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err = fn()
+		if err == nil || !isRetriable(err) {
+			return err
+		}
+		if attempt == maxRetries {
+			break
+		}
+		delay := retryBaseDelay * time.Duration(1<<attempt)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
 // revisionOf is the If-Match value for a write against a file last seen with
 // this modTime - the same value drive/list's "revision" field carries, so a
 // write only succeeds if the file hasn't changed since this client's last
@@ -212,7 +261,11 @@ func (f *Fs) listDir(ctx context.Context, dirID string, fn func(*listPage) (stop
 	for {
 		var page listPage
 		opts := rest.Opts{Method: "GET", Path: "/drive/list", Parameters: params}
-		if _, err := f.srv.CallJSON(ctx, &opts, nil, &page); err != nil {
+		err := withRetry(ctx, func() error {
+			_, err := f.srv.CallJSON(ctx, &opts, nil, &page)
+			return err
+		})
+		if err != nil {
 			return err
 		}
 		if fn(&page) || page.NextCursor == nil {
@@ -473,7 +526,14 @@ func (f *Fs) putLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo, leaf
 	var file apiFile
 	completeOpts := rest.Opts{Method: "POST", Path: "/storage/upload/complete"}
 	completeBody := map[string]any{"uploadId": init.UploadID, "parts": completedParts}
-	if _, err := f.srv.CallJSON(ctx, &completeOpts, completeBody, &file); err != nil {
+	// Safe to retry: a lost response after a real completion just means the
+	// PendingUpload row is already COMPLETED, so a retry cleanly fails with
+	// "no pending upload found" rather than creating a second File row.
+	err = withRetry(ctx, func() error {
+		_, err := f.srv.CallJSON(ctx, &completeOpts, completeBody, &file)
+		return err
+	})
+	if err != nil {
 		return nil, true, err
 	}
 	file.UpdatedAt = time.Now() // ponytail: complete's reply has no updatedAt either, same as the simple path
@@ -483,25 +543,34 @@ func (f *Fs) putLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo, leaf
 // putPart PUTs one part directly to a presigned storage URL (bypassing
 // f.srv - these URLs carry their own auth, not our Bearer token) and
 // returns the ETag the multipart complete step needs to identify it.
+// Retried on transient failures (429/5xx) - safe by S3 multipart's own
+// design, re-uploading the same part number just overwrites it. This is
+// the single highest-value retry point in the whole client: a large
+// upload over a real network is exactly where a transient blip is likely,
+// and without this, one bad part means restarting the entire upload.
 func putPart(ctx context.Context, url string, data []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-	req.ContentLength = int64(len(data))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("upload part failed: status %d", resp.StatusCode)
-	}
-	etag := resp.Header.Get("ETag")
-	if etag == "" {
-		return "", errors.New("upload part response had no ETag header")
-	}
-	return etag, nil
+	var etag string
+	err := withRetry(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		req.ContentLength = int64(len(data))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return &apiError{Status: resp.StatusCode, Message: "upload part failed"}
+		}
+		etag = resp.Header.Get("ETag")
+		if etag == "" {
+			return errors.New("upload part response had no ETag header")
+		}
+		return nil
+	})
+	return etag, err
 }
 
 // Mkdir creates dir and any missing parents.
@@ -622,7 +691,11 @@ func (f *Fs) recoverFromAtomicSave(ctx context.Context, srcObj *Object, dstDirID
 		DeletedAt *time.Time `json:"deletedAt"`
 	}
 	opts := rest.Opts{Method: "GET", Path: "/files/trash"}
-	if _, err := f.srv.CallJSON(ctx, &opts, nil, &trash); err != nil {
+	err := withRetry(ctx, func() error {
+		_, err := f.srv.CallJSON(ctx, &opts, nil, &trash)
+		return err
+	})
+	if err != nil {
 		return nil, nil // best-effort: a lookup failure just falls back to an ordinary rename
 	}
 	wantFolder := dstDirID
@@ -700,7 +773,11 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 		StorageLimit string `json:"storageLimit"`
 	}
 	opts := rest.Opts{Method: "GET", Path: "/auth/me"}
-	if _, err := f.srv.CallJSON(ctx, &opts, nil, &me); err != nil {
+	err := withRetry(ctx, func() error {
+		_, err := f.srv.CallJSON(ctx, &opts, nil, &me)
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
 	used, _ := strconv.ParseInt(me.StorageUsed, 10, 64)
@@ -766,7 +843,12 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	}
 	fs.FixRangeOption(options, o.size)
 	opts := rest.Opts{Method: "GET", Path: "/files/" + o.id + "/stream", Options: options}
-	resp, err := o.fs.srv.Call(ctx, &opts)
+	var resp *http.Response
+	err := withRetry(ctx, func() error {
+		var err error
+		resp, err = o.fs.srv.Call(ctx, &opts)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -891,7 +973,14 @@ func (o *Object) updateLarge(ctx context.Context, in io.Reader, src fs.ObjectInf
 	var file apiFile
 	completeOpts := rest.Opts{Method: "POST", Path: "/files/" + o.id + "/version/complete"}
 	completeBody := map[string]any{"uploadId": init.UploadID, "parts": completedParts}
-	if _, err := o.fs.srv.CallJSON(ctx, &completeOpts, completeBody, &file); err != nil {
+	// Safe to retry, same reasoning as putLarge's complete step: a lost
+	// response after a real completion leaves the PendingUpload row
+	// COMPLETED, so a retry cleanly fails instead of double-applying.
+	err = withRetry(ctx, func() error {
+		_, err := o.fs.srv.CallJSON(ctx, &completeOpts, completeBody, &file)
+		return err
+	})
+	if err != nil {
 		return true, err
 	}
 	*o = *o.fs.newObject(o.remote, file)
