@@ -594,3 +594,35 @@ func TestUpdateLargeConflict(t *testing.T) {
 		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
+
+// TestAbout confirms the mount reports real plan-quota numbers, not
+// placeholders - this is what makes Windows Explorer / Finder show an
+// accurate used/free bar for the mounted drive, and what lets a native
+// copy dialog refuse an over-quota write before it ever starts.
+func TestAbout(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/me", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"storageUsed":"60000000000","storageLimit":"100000000000"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := f.Features().About(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *usage.Total != 100000000000 {
+		t.Fatalf("Total = %d, want 100000000000 (the plan's 100GB limit)", *usage.Total)
+	}
+	if *usage.Used != 60000000000 {
+		t.Fatalf("Used = %d, want 60000000000", *usage.Used)
+	}
+	if *usage.Free != 40000000000 {
+		t.Fatalf("Free = %d, want 40000000000 (100GB limit - 60GB used)", *usage.Free)
+	}
+}
