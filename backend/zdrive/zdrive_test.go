@@ -2,6 +2,7 @@ package zdrive
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -401,7 +402,7 @@ func TestPutLarge(t *testing.T) {
 		if !strings.Contains(string(body), `"contentHash"`) {
 			t.Fatalf("initiate body missing contentHash: %s", body)
 		}
-		io.WriteString(w, `{"uploadId":"up1","key":"k1","parts":[{"partNumber":1,"url":"`+srvURL+`/fake-s3-part"}]}`)
+		io.WriteString(w, `{"uploadId":"up1","key":"k1","partSize":16777216,"parts":[{"partNumber":1,"url":"`+srvURL+`/fake-s3-part"}]}`)
 	})
 	mux.HandleFunc("/fake-s3-part", func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, "part-put")
@@ -466,5 +467,130 @@ func TestClientVersionHeader(t *testing.T) {
 	}
 	if gotVersion != ClientVersion {
 		t.Fatalf("X-ZDrive-Client-Version = %q, want %q", gotVersion, ClientVersion)
+	}
+}
+
+// TestUpdateLarge: a version upload declared >= largeUploadMinBytes goes
+// through the presigned-multipart flow (initiate/PUT-part/complete against
+// /files/:id/version/...) instead of the single-POST path, and still sends
+// If-Match (B3).
+func TestUpdateLarge(t *testing.T) {
+	const content = "large new version content"
+	var srvURL string
+	var ifMatchSent string
+	var partBody []byte
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/list", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"folders":[],"files":[{"id":"f1","name":"video.mp4","size":"5","updatedAt":"2026-09-26T10:00:00Z"}],"nextCursor":null}`)
+	})
+	mux.HandleFunc("/files/f1/version/initiate", func(w http.ResponseWriter, r *http.Request) {
+		ifMatchSent = r.Header.Get("If-Match")
+		io.WriteString(w, `{"uploadId":"up1","partSize":16777216,"parts":[{"partNumber":1,"url":"`+srvURL+`/fake-s3-part"}]}`)
+	})
+	mux.HandleFunc("/fake-s3-part", func(w http.ResponseWriter, r *http.Request) {
+		partBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("ETag", `"etag1"`)
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/files/f1/version/complete", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"id":"f1","name":"video.mp4","size":%d,"updatedAt":"2026-09-27T10:00:00Z"}`, len(content))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.NewObject(ctx, "video.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = o.Update(ctx, strings.NewReader(content), object.NewStaticObjectInfo("video.mp4", time.Now(), largeUploadMinBytes, true, nil, nil))
+	if err != nil {
+		t.Fatalf("Update (large) = %v", err)
+	}
+	if ifMatchSent == "" {
+		t.Fatal("If-Match was not sent on the large-version initiate")
+	}
+	if string(partBody) != content {
+		t.Fatalf("uploaded part body = %q, want %q", partBody, content)
+	}
+	if o.(*Object).id != "f1" {
+		t.Fatalf("object id after update = %q, want f1", o.(*Object).id)
+	}
+}
+
+// TestUpdateLargeConflict: a stale If-Match on a LARGE version upload also
+// gets the B3 keep-both treatment, and the conflicted copy itself goes
+// through the large (presigned-multipart) create path, not the simple one -
+// the copy is exactly as big as the edit that triggered it.
+func TestUpdateLargeConflict(t *testing.T) {
+	const content = "large conflicted content"
+	var srvURL string
+	var copyPartBody []byte
+	var copyName string
+	var calls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/list", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"folders":[],"files":[{"id":"f1","name":"video.mp4","size":"5","updatedAt":"2026-09-26T10:00:00Z"}],"nextCursor":null}`)
+	})
+	mux.HandleFunc("/files/f1/version/initiate", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "version-initiate")
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"message":"stale"}`)
+	})
+	mux.HandleFunc("/storage/upload/initiate", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "copy-initiate")
+		var body map[string]any
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatal(err)
+		}
+		copyName, _ = body["name"].(string)
+		io.WriteString(w, `{"uploadId":"up2","partSize":16777216,"parts":[{"partNumber":1,"url":"`+srvURL+`/fake-s3-part"}]}`)
+	})
+	mux.HandleFunc("/fake-s3-part", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "part-put")
+		copyPartBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("ETag", `"etag2"`)
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/storage/upload/complete", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "copy-complete")
+		fmt.Fprintf(w, `{"id":"f2","name":%q,"size":%d}`, copyName, len(content))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.NewObject(ctx, "video.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = o.Update(ctx, strings.NewReader(content), object.NewStaticObjectInfo("video.mp4", time.Now(), largeUploadMinBytes, true, nil, nil))
+	if err != nil {
+		t.Fatalf("Update should resolve the conflict via a large keep-both copy, not fail: %v", err)
+	}
+	if string(copyPartBody) != content {
+		t.Fatalf("conflicted copy part body = %q, want %q", copyPartBody, content)
+	}
+	if !strings.Contains(copyName, "(conflicted copy ") || !strings.HasSuffix(copyName, ".mp4") {
+		t.Fatalf("conflicted copy name = %q", copyName)
+	}
+	want := []string{"version-initiate", "copy-initiate", "part-put", "copy-complete"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }

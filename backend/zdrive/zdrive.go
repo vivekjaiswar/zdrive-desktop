@@ -45,14 +45,13 @@ const ClientVersion = "0.3.0"
 // ZDrive names may contain anything; encode only what can't be a path segment.
 const enc = encoder.Standard
 
-// Must match the backend's LARGE_UPLOAD_MIN_SIZE_BYTES / MULTIPART_PART_SIZE_BYTES
-// defaults (storage.service.ts) - the server computes exactly
-// ceil(size/multipartPartBytes) presigned part URLs, so the client's part
-// size has to match, not just be "close enough".
-const (
-	largeUploadMinBytes = 50 * 1024 * 1024
-	multipartPartBytes  = 16 * 1024 * 1024
-)
+// Must match the backend's LARGE_UPLOAD_MIN_SIZE_BYTES default
+// (storage.service.ts) - below this, the simple single-POST path is used
+// instead. The per-part size is NOT a client-side constant: the server
+// scales it with file size (to stay within S3/MinIO's 10,000-part ceiling
+// on very large files) and returns the actual partSize it used, which the
+// client reads directly rather than assuming a fixed value.
+const largeUploadMinBytes = 50 * 1024 * 1024
 
 // syncSkip reports whether leaf is an editor lock/swap file or OS metadata
 // that should live only in the local VFS cache and never sync remotely.
@@ -385,6 +384,57 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	return f.newObject(src.Remote(), file), nil
 }
 
+// initiateUploadResp is the shared shape of both /storage/upload/initiate
+// and /files/:id/version/initiate - partSize is the server's actual chosen
+// per-part size (it scales this up for very large files to stay within
+// S3/MinIO's 10,000-part ceiling), not a value the client gets to assume.
+type initiateUploadResp struct {
+	UploadID string `json:"uploadId"`
+	PartSize int    `json:"partSize"`
+	Parts    []struct {
+		PartNumber int    `json:"partNumber"`
+		URL        string `json:"url"`
+	} `json:"parts"`
+}
+
+// hashAndRewind hashes all of in (which must be fully consumed to do so)
+// and seeks it back to the start, so the caller can then read it again for
+// the actual upload. Returns ok=false, untouched, if in isn't seekable.
+func hashAndRewind(in io.Reader) (contentHash string, ok bool, err error) {
+	seeker, ok := in.(io.Seeker)
+	if !ok {
+		return "", false, nil
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, in); err != nil {
+		return "", true, err
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return "", true, err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), true, nil
+}
+
+// uploadParts reads exactly resp.PartSize bytes per part from in (the last
+// part may be shorter) and PUTs each directly to its presigned URL,
+// collecting the ETags the complete step needs to identify them.
+func uploadParts(ctx context.Context, in io.Reader, resp *initiateUploadResp) ([]map[string]any, error) {
+	completedParts := make([]map[string]any, 0, len(resp.Parts))
+	buf := make([]byte, resp.PartSize)
+	for _, part := range resp.Parts {
+		n, err := io.ReadFull(in, buf)
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, err
+		}
+		etag, err := putPart(ctx, part.URL, buf[:n])
+		if err != nil {
+			return nil, err
+		}
+		completedParts = append(completedParts, map[string]any{"partNumber": part.PartNumber, "etag": etag})
+	}
+	return completedParts, nil
+}
+
 // putLarge implements B6: uploads via POST /storage/upload/initiate, then
 // PUTs each part directly to presigned storage URLs (the file never
 // round-trips through the API server's own request body), then finalizes
@@ -392,18 +442,13 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 // actually ran (false only when in isn't seekable, so the caller knows not
 // to also try the fallback path against an already-drained reader).
 func (f *Fs) putLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo, leaf, dirID string) (fs.Object, bool, error) {
-	seeker, ok := in.(io.Seeker)
+	contentHash, ok, err := hashAndRewind(in)
 	if !ok {
 		return nil, false, nil
 	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, in); err != nil {
+	if err != nil {
 		return nil, true, err
 	}
-	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-		return nil, true, err
-	}
-	contentHash := hex.EncodeToString(hasher.Sum(nil))
 
 	body := map[string]any{
 		"name":        enc.FromStandardName(leaf),
@@ -414,30 +459,15 @@ func (f *Fs) putLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo, leaf
 	if dirID != rootID {
 		body["folderId"] = dirID
 	}
-	var init struct {
-		UploadID string `json:"uploadId"`
-		Parts    []struct {
-			PartNumber int    `json:"partNumber"`
-			URL        string `json:"url"`
-		} `json:"parts"`
-	}
+	var init initiateUploadResp
 	initOpts := rest.Opts{Method: "POST", Path: "/storage/upload/initiate"}
 	if _, err := f.srv.CallJSON(ctx, &initOpts, body, &init); err != nil {
 		return nil, true, err
 	}
 
-	completedParts := make([]map[string]any, 0, len(init.Parts))
-	buf := make([]byte, multipartPartBytes)
-	for _, part := range init.Parts {
-		n, err := io.ReadFull(in, buf)
-		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, true, err
-		}
-		etag, err := putPart(ctx, part.URL, buf[:n])
-		if err != nil {
-			return nil, true, err
-		}
-		completedParts = append(completedParts, map[string]any{"partNumber": part.PartNumber, "etag": etag})
+	completedParts, err := uploadParts(ctx, in, &init)
+	if err != nil {
+		return nil, true, err
 	}
 
 	var file apiFile
@@ -755,8 +785,19 @@ func conflictedCopyName(name string) string {
 	return fmt.Sprintf("%s (conflicted copy %s %s)%s", base, host, time.Now().Format("2006-01-02"), ext)
 }
 
-// Update uploads new content as a version via POST /files/:id/version. The
-// server renames the file to the upload's filename, so send the current leaf.
+// dirOfRemote normalizes path.Dir's "." (no directory component) to "",
+// matching how this package's dircache/API calls represent the root.
+func dirOfRemote(remote string) string {
+	dir := path.Dir(remote)
+	if dir == "." {
+		return ""
+	}
+	return dir
+}
+
+// Update uploads new content as the next version - a single POST (small
+// files) or the presigned-multipart flow via updateLarge (B6, files
+// crossing largeUploadMinBytes, mirrors Put's own split).
 //
 // If-Match guards against a stale write (B3): a 409 means the remote file
 // changed since this object was last read, so the edit is kept as a new
@@ -767,18 +808,12 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		_, _ = io.Copy(io.Discard, in)
 		return nil
 	}
-	var resp struct {
-		File apiFile `json:"file"`
-	}
-	headers := map[string]string{"If-Match": revisionOf(o.modTime)}
-	err := o.fs.upload(ctx, "/files/"+o.id+"/version", nil, enc.FromStandardName(path.Base(o.remote)), in, src, &resp, headers)
-	if err == nil {
-		*o = *o.fs.newObject(o.remote, resp.File)
-		return nil
-	}
-	if !isConflict(err) {
+
+	err := o.updateOnce(ctx, in, src)
+	if err == nil || !isConflict(err) {
 		return err
 	}
+
 	seeker, ok := in.(io.Seeker)
 	if !ok {
 		// ponytail: can't safely retry the write without a re-readable body
@@ -790,24 +825,115 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
 		return err
 	}
-	leaf, dirID, fErr := o.fs.dirCache.FindPath(ctx, o.remote, false)
-	if fErr != nil {
+	return o.keepBothCopy(ctx, in, src)
+}
+
+// updateOnce makes one attempt to upload new content as the next version -
+// large (updateLarge) or the simple single POST, chosen by size like Put.
+// If updateLarge declines (in isn't seekable), falls through to the simple
+// path, which works fine for a first attempt without seeking.
+func (o *Object) updateOnce(ctx context.Context, in io.Reader, src fs.ObjectInfo) error {
+	if src.Size() >= largeUploadMinBytes {
+		ok, err := o.updateLarge(ctx, in, src)
+		if ok {
+			return err
+		}
+	}
+	var resp struct {
+		File apiFile `json:"file"`
+	}
+	headers := map[string]string{"If-Match": revisionOf(o.modTime)}
+	err := o.fs.upload(ctx, "/files/"+o.id+"/version", nil, enc.FromStandardName(path.Base(o.remote)), in, src, &resp, headers)
+	if err != nil {
 		return err
 	}
+	*o = *o.fs.newObject(o.remote, resp.File)
+	return nil
+}
+
+// updateLarge is the version-upload equivalent of putLarge: presigned
+// multipart via POST /files/:id/version/initiate + /complete instead of
+// buffering the whole edit through a single request. Same bool-return
+// contract as putLarge (false only when in isn't seekable).
+func (o *Object) updateLarge(ctx context.Context, in io.Reader, src fs.ObjectInfo) (bool, error) {
+	contentHash, ok, err := hashAndRewind(in)
+	if !ok {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+
+	body := map[string]any{
+		"name":        enc.FromStandardName(path.Base(o.remote)),
+		"size":        src.Size(),
+		"mimeType":    fs.MimeType(ctx, src),
+		"contentHash": contentHash,
+	}
+	var init initiateUploadResp
+	initOpts := rest.Opts{
+		Method:       "POST",
+		Path:         "/files/" + o.id + "/version/initiate",
+		ExtraHeaders: map[string]string{"If-Match": revisionOf(o.modTime)},
+	}
+	if _, err := o.fs.srv.CallJSON(ctx, &initOpts, body, &init); err != nil {
+		return true, err
+	}
+
+	completedParts, err := uploadParts(ctx, in, &init)
+	if err != nil {
+		return true, err
+	}
+
+	// Flat apiFile, not {"file": ...} - completeLargeVersionUpload mirrors
+	// completeLargeUpload's (new-file) response shape, not the simple
+	// POST /files/:id/version endpoint's wrapped one.
+	var file apiFile
+	completeOpts := rest.Opts{Method: "POST", Path: "/files/" + o.id + "/version/complete"}
+	completeBody := map[string]any{"uploadId": init.UploadID, "parts": completedParts}
+	if _, err := o.fs.srv.CallJSON(ctx, &completeOpts, completeBody, &file); err != nil {
+		return true, err
+	}
+	*o = *o.fs.newObject(o.remote, file)
+	return true, nil
+}
+
+// keepBothCopy uploads in (already rewound to the start by the caller) as a
+// new sibling file instead of the version Update was trying to write - the
+// B3 "keep both" conflict resolution. Small or large upload chosen by size,
+// mirroring Put's own split; the new object's own identity is discarded
+// (Update's contract is "did the version write succeed", not "here's the
+// copy" - a later listing picks it up naturally).
+func (o *Object) keepBothCopy(ctx context.Context, in io.Reader, src fs.ObjectInfo) error {
+	leaf, dirID, fErr := o.fs.dirCache.FindPath(ctx, o.remote, false)
+	if fErr != nil {
+		return fErr
+	}
+	name := conflictedCopyName(leaf)
+
+	if src.Size() >= largeUploadMinBytes {
+		copyRemote := path.Join(dirOfRemote(o.remote), name)
+		copyInfo := object.NewStaticObjectInfo(copyRemote, src.ModTime(ctx), src.Size(), true, nil, nil)
+		if _, ok, err := o.fs.putLarge(ctx, in, copyInfo, name, dirID); ok {
+			if err != nil {
+				return err
+			}
+			o.fs.dirCache.FlushDir(dirOfRemote(o.remote))
+			return nil
+		}
+		// not seekable - but the caller already proved in is seekable
+		// (that's why we're here); defensive fallback only.
+	}
+
 	params := url.Values{}
 	if dirID != rootID {
 		params.Set("folderId", dirID)
 	}
 	var copyResp apiFile
-	name := conflictedCopyName(leaf)
 	if uErr := o.fs.upload(ctx, "/storage/upload", params, enc.FromStandardName(name), in, src, &copyResp, nil); uErr != nil {
 		return uErr
 	}
-	dir := path.Dir(o.remote)
-	if dir == "." {
-		dir = ""
-	}
-	o.fs.dirCache.FlushDir(dir)
+	o.fs.dirCache.FlushDir(dirOfRemote(o.remote))
 	return nil
 }
 
