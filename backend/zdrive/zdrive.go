@@ -249,6 +249,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.root, f.dirCache = newRoot, parent.dirCache
 		return f, fs.ErrorIsFile
 	}
+	go f.pollChanges(ctx)
 	return f, nil
 }
 
@@ -823,6 +824,69 @@ func (f *Fs) Hashes() hash.Set { return hash.Set(hash.None) }
 
 // DirCacheFlush drops cached path->ID mappings.
 func (f *Fs) DirCacheFlush() { f.dirCache.ResetRoot() }
+
+// changesPollInterval is how often pollChanges checks GET /drive/changes -
+// replaces waiting out the VFS directory-cache TTL (rclone's own
+// --dir-cache-time, default 5 minutes) for noticing a remote change made
+// elsewhere (web app, another device, another desktop install).
+const changesPollInterval = 30 * time.Second
+
+type changesResponse struct {
+	Files            []json.RawMessage `json:"files"`
+	Folders          []json.RawMessage `json:"folders"`
+	DeletedFileIDs   []string          `json:"deletedFileIds"`
+	DeletedFolderIDs []string          `json:"deletedFolderIds"`
+	NextCursor       string            `json:"nextCursor"`
+}
+
+// pollChanges runs for the lifetime of ctx (the one NewFs was called with -
+// there's no explicit unmount hook on this mount path, rclone's own
+// Shutdowner interface is only ever invoked by `serve docker`, not plain
+// `mount`/`cmount` - so this just runs until the process exits, same as
+// the mount itself does).
+func (f *Fs) pollChanges(ctx context.Context) {
+	ticker := time.NewTicker(changesPollInterval)
+	defer ticker.Stop()
+	var cursor string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cursor, _ = f.pollChangesOnce(ctx, cursor)
+		}
+	}
+}
+
+// pollChangesOnce does a single GET /drive/changes and, if anything came
+// back, drops the whole local directory cache rather than surgically
+// invalidating just the affected folders - reverse-engineering rclone's
+// internal id->path cache for that isn't worth it for v1; the cost (a few
+// extra relist calls right after a real change) is small. Split out from
+// pollChanges so a test can call it directly without waiting on a real
+// ticker. Returns the cursor to use next time (unchanged on a request
+// error - a transient failure shouldn't skip ahead and miss whatever
+// happened during it) and whether a flush happened (so a test can assert
+// on this method's own branch decision directly, rather than needing to
+// prove rclone's own, already-used dircache.ResetRoot() took effect).
+func (f *Fs) pollChangesOnce(ctx context.Context, cursor string) (nextCursor string, flushed bool) {
+	params := url.Values{}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+	var resp changesResponse
+	opts := rest.Opts{Method: "GET", Path: "/drive/changes", Parameters: params}
+	if _, err := f.srv.CallJSON(ctx, &opts, nil, &resp); err != nil {
+		fs.Debugf(f, "poll changes: %v", err)
+		return cursor, false
+	}
+	if len(resp.Files) > 0 || len(resp.Folders) > 0 ||
+		len(resp.DeletedFileIDs) > 0 || len(resp.DeletedFolderIDs) > 0 {
+		f.DirCacheFlush()
+		flushed = true
+	}
+	return resp.NextCursor, flushed
+}
 
 // Fs returns the parent Fs.
 func (o *Object) Fs() fs.Info { return o.fs }
