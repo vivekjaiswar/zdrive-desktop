@@ -737,3 +737,75 @@ func TestAbout(t *testing.T) {
 		t.Fatalf("Free = %d, want 40000000000 (100GB limit - 60GB used)", *usage.Free)
 	}
 }
+
+// TestPollChangesOnce: a non-empty GET /drive/changes response flushes the
+// local directory cache and advances the cursor; an empty one advances the
+// cursor without flushing; a request error leaves the cursor unchanged
+// (so a transient failure can't skip past whatever happened during it).
+func TestPollChangesOnce(t *testing.T) {
+	var cursorsSeen []string
+	respond := `{"files":[{"id":"f1"}],"folders":[],"deletedFileIds":[],"deletedFolderIds":[],"nextCursor":"2026-10-02T00:00:00.000Z"}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/changes", func(w http.ResponseWriter, r *http.Request) {
+		cursorsSeen = append(cursorsSeen, r.URL.Query().Get("cursor"))
+		io.WriteString(w, respond)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := context.Background()
+	fsIface, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fsIface.(*Fs)
+
+	// Non-empty response: flushes, advances the cursor.
+	cursor, flushed := f.pollChangesOnce(ctx, "")
+	if !flushed {
+		t.Fatal("flushed = false, want true for a non-empty changes response")
+	}
+	if cursor != "2026-10-02T00:00:00.000Z" {
+		t.Fatalf("cursor = %q", cursor)
+	}
+
+	// Empty response: no flush, cursor still advances to whatever the
+	// server returns.
+	respond = `{"files":[],"folders":[],"deletedFileIds":[],"deletedFolderIds":[],"nextCursor":"2026-10-02T00:00:01.000Z"}`
+	cursor, flushed = f.pollChangesOnce(ctx, cursor)
+	if flushed {
+		t.Fatal("flushed = true, want false for an empty changes response")
+	}
+	if cursor != "2026-10-02T00:00:01.000Z" {
+		t.Fatalf("cursor = %q", cursor)
+	}
+
+	if len(cursorsSeen) != 2 || cursorsSeen[0] != "" || cursorsSeen[1] != "2026-10-02T00:00:00.000Z" {
+		t.Fatalf("cursorsSeen = %v", cursorsSeen)
+	}
+}
+
+// TestPollChangesOnceRequestError: a failed request leaves the cursor
+// unchanged and never flushes - a transient outage shouldn't lose track
+// of what the client has already seen.
+func TestPollChangesOnceRequestError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	fsIface, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fsIface.(*Fs)
+
+	cursor, flushed := f.pollChangesOnce(ctx, "some-cursor")
+	if flushed {
+		t.Fatal("flushed = true, want false on a request error")
+	}
+	if cursor != "some-cursor" {
+		t.Fatalf("cursor = %q, want unchanged %q", cursor, "some-cursor")
+	}
+}
