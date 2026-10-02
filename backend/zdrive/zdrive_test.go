@@ -178,6 +178,117 @@ func TestWrites(t *testing.T) {
 	}
 }
 
+// dirMoveFixture starts a fake server with two root folders - "Docs" (d1,
+// the one being moved) and "Archive" (d2, the destination parent) - and a
+// fresh Fs, for a single DirMove call. Each test gets its own instance
+// rather than chaining several moves against one long-lived Fs: dircache
+// negatively caches a directory's listing the moment DirMove's own
+// pre-check confirms the destination doesn't exist yet, and never
+// invalidates that entry after the real move happens server-side - a
+// rclone-library quirk every backend using dircache.DirMove shares (Box's
+// own DirMove, for one, only ever flushes the source path too), not
+// something to work around here. One clean move per Fs sidesteps it
+// entirely while still proving this code sends the right API calls.
+func dirMoveFixture(t *testing.T) (fs.Fs, *[]string) {
+	t.Helper()
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := r.Method + " " + r.URL.Path
+		if r.Body != nil {
+			body, _ := io.ReadAll(r.Body)
+			if len(body) > 0 {
+				call += " " + string(body)
+			}
+		}
+		if r.Method != "GET" {
+			calls = append(calls, call)
+		}
+		switch {
+		case r.URL.Path == "/drive/list":
+			var folders string
+			switch r.URL.Query().Get("folderId") {
+			case "":
+				folders = `[{"id":"d1","name":"Docs"},{"id":"d2","name":"Archive"}]`
+			case "d2":
+				folders = `[{"id":"d3","name":"Nested"}]`
+			default:
+				folders = `[]`
+			}
+			io.WriteString(w, `{"folders":`+folders+`,"files":[],"nextCursor":null}`)
+		case strings.HasPrefix(r.URL.Path, "/folders/d1") || strings.HasPrefix(r.URL.Path, "/folders/d3"):
+			io.WriteString(w, `{"id":"d1"}`)
+		default:
+			w.WriteHeader(404)
+			io.WriteString(w, `{"message":"not found"}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, &calls
+}
+
+// TestDirMoveCrossParent: a plain re-parent (same name) now goes through
+// PATCH /folders/:id/move (backend PR #90) in one call, instead of the old
+// ErrorCantDirMove that made rclone's VFS fall back to moving every file
+// inside the directory individually.
+func TestDirMoveCrossParent(t *testing.T) {
+	f, calls := dirMoveFixture(t)
+	ctx := context.Background()
+
+	if err := f.Features().DirMove(ctx, f, "Docs", "Archive/Docs"); err != nil {
+		t.Fatalf("DirMove = %v", err)
+	}
+
+	want := []string{`PATCH /folders/d1/move {"parentId":"d2"}`}
+	if strings.Join(*calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(*calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestDirMoveCrossParentAndRename: a re-parent that also changes the name
+// fires both the move and the rename PATCH.
+func TestDirMoveCrossParentAndRename(t *testing.T) {
+	f, calls := dirMoveFixture(t)
+	ctx := context.Background()
+
+	if err := f.Features().DirMove(ctx, f, "Docs", "Archive/Renamed"); err != nil {
+		t.Fatalf("DirMove = %v", err)
+	}
+
+	want := []string{
+		`PATCH /folders/d1/move {"parentId":"d2"}`,
+		`PATCH /folders/d1 {"name":"Renamed"}`,
+	}
+	if strings.Join(*calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(*calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestDirMoveToRoot: moving a nested folder back to root sends an empty
+// body (no parentId key) - the API rejects a literal null, same convention
+// files' own Move() already follows.
+func TestDirMoveToRoot(t *testing.T) {
+	f, calls := dirMoveFixture(t)
+	ctx := context.Background()
+
+	if err := f.Features().DirMove(ctx, f, "Archive/Nested", "Final"); err != nil {
+		t.Fatalf("DirMove = %v", err)
+	}
+
+	want := []string{
+		`PATCH /folders/d3/move {}`,
+		`PATCH /folders/d3 {"name":"Final"}`,
+	}
+	if strings.Join(*calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(*calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // TestUpdateConflict: a stale If-Match on a version upload gets a 409, and
 // the edit is kept as a new sibling file (B3's "keep both") instead of
 // being dropped or overwriting a remote change this client never saw.

@@ -751,16 +751,33 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	if !ok {
 		return fs.ErrorCantDirMove
 	}
-	srcID, srcDirID, _, dstDirID, dstLeaf, err := f.dirCache.DirMove(ctx, srcFs.dirCache, srcFs.root, srcRemote, f.root, dstRemote)
+	srcID, srcDirID, srcLeaf, dstDirID, dstLeaf, err := f.dirCache.DirMove(ctx, srcFs.dirCache, srcFs.root, srcRemote, f.root, dstRemote)
 	if err != nil {
 		return err
 	}
 	if srcDirID != dstDirID {
-		return fs.ErrorCantDirMove
-	}
-	opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID}
-	if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil); err != nil {
-		return err
+		// Re-parent via PATCH /folders/:id/move (backend PR #90) - previously
+		// this branch just returned ErrorCantDirMove, which made rclone's VFS
+		// fall back to moving every file inside the directory individually.
+		body := map[string]string{} // no parentId = root; the API rejects null
+		if dstDirID != rootID {
+			body["parentId"] = dstDirID
+		}
+		opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID + "/move"}
+		if _, err := f.srv.CallJSON(ctx, &opts, body, nil); err != nil {
+			return err
+		}
+		if dstLeaf != srcLeaf {
+			opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID}
+			if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil); err != nil {
+				return err
+			}
+		}
+	} else {
+		opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID}
+		if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil); err != nil {
+			return err
+		}
 	}
 	srcFs.dirCache.FlushDir(srcRemote)
 	return nil
