@@ -15,7 +15,7 @@ import (
 	"os"
 
 	_ "github.com/rclone/rclone/backend/local" // VFS cache storage
-	_ "github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
+	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 
 	"github.com/rclone/rclone/cmd"
@@ -25,11 +25,15 @@ import (
 	_ "github.com/rclone/rclone/cmd/mount"
 	_ "github.com/rclone/rclone/cmd/nfsmount"
 	_ "github.com/rclone/rclone/cmd/version"
+	"github.com/rclone/rclone/fs/config"
 )
 
 func main() {
 	if os.Getenv("RCLONE_VOLNAME") == "" {
 		os.Setenv("RCLONE_VOLNAME", "ZDrive") // drive label in Explorer/Finder
 	}
+	// As early as possible, before any command runs - so a failure in
+	// *any* command (not just mount) still lands in the local event log.
+	zdrive.SetupEventLogging(zdrive.EventLogPath(config.GetConfigPath()))
 	cmd.Main()
 }
