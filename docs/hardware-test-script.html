@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZDrive Desktop — Hardware Test Script</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --border: #e5e7eb;
+    --accent: #2563eb; --code-bg: #f3f4f6; --ok: #16a34a; --warn: #d97706;
+    --card: #fafafa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --fg: #e5e7eb; --muted: #9ca3af; --border: #2a2d35;
+      --accent: #60a5fa; --code-bg: #1a1d24; --ok: #4ade80; --warn: #fbbf24;
+      --card: #171920;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --fg: #e5e7eb; --muted: #9ca3af; --border: #2a2d35;
+    --accent: #60a5fa; --code-bg: #1a1d24; --ok: #4ade80; --warn: #fbbf24;
+    --card: #171920;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; padding: 16px; line-height: 1.5;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .sub { color: var(--muted); margin-top: 0; margin-bottom: 24px; font-size: 0.95rem; }
+  h2 { font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 36px; }
+  h3 { font-size: 1rem; color: var(--accent); margin-top: 20px; margin-bottom: 8px; }
+  code, pre {
+    background: var(--code-bg); border-radius: 6px; font-size: 0.88em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  code { padding: 2px 6px; }
+  pre { padding: 12px 14px; overflow-x: auto; margin: 8px 0; }
+  .step { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; }
+  .step input[type="checkbox"] { width: 18px; height: 18px; margin-top: 3px; flex-shrink: 0; }
+  .step label { flex: 1; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+  .expect { color: var(--ok); font-weight: 600; }
+  .watch { color: var(--warn); font-weight: 600; }
+  .muted { color: var(--muted); font-size: 0.9em; }
+  a { color: var(--accent); }
+  .tag { display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em;
+    padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
+  .tag.win { background: #dbeafe; color: #1e40af; }
+  .tag.mac { background: #fce7f3; color: #9d174d; }
+  .tag.both { background: #dcfce7; color: #166534; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .tag.win { background: #1e3a5f; color: #93c5fd; }
+    :root:not([data-theme="light"]) .tag.mac { background: #4a1d3d; color: #f9a8d4; }
+    :root:not([data-theme="light"]) .tag.both { background: #14361f; color: #86efac; }
+  }
+  :root[data-theme="dark"] .tag.win { background: #1e3a5f; color: #93c5fd; }
+  :root[data-theme="dark"] .tag.mac { background: #4a1d3d; color: #f9a8d4; }
+  :root[data-theme="dark"] .tag.both { background: #14361f; color: #86efac; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ZDrive Desktop — Hardware Test Script</h1>
+  <p class="sub">Covers everything merged into <code>main</code> as of 2026-10-04: B1–B6, conflict detection, editor-save handling, folder move, change-feed. Check boxes as you go — this page doesn't save state, so take a screenshot or note results elsewhere when done.</p>
+
+  <div class="card">
+    <strong>Report back, for each platform:</strong> which steps passed, which failed (with the exact error/behavior you saw), and anything that felt slow or wrong even if it "worked."
+  </div>
+
+  <h2>0. Setup <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s0-1"><label for="s0-1">Go to <a href="https://github.com/vivekjaiswar/zdrive-desktop/actions">github.com/vivekjaiswar/zdrive-desktop/actions</a>, open the latest green <code>build</code> run on <code>main</code>, download the <code>zdrive-binaries</code> artifact, unzip it.</label></div>
+  <div class="step"><input type="checkbox" id="s0-2"><label for="s0-2">Decide staging vs production for this pass. <strong>Recommended: staging</strong> (<code>--url https://staging.zhdrive.in/api</code> on <code>login</code>) — real production is live and customer-facing.</label></div>
+
+  <h3>Windows <span class="tag win">Windows</span></h3>
+  <div class="step"><input type="checkbox" id="sw-1"><label for="sw-1">Run <code>zdrive-windows-setup.exe</code>. <span class="expect">Expect:</span> installs silently (no separate WinFsp download prompt), offers sign-in on the finish page.</label></div>
+  <div class="step"><input type="checkbox" id="sw-2"><label for="sw-2"><span class="watch">Watch for:</span> Windows SmartScreen "unknown publisher" warning — expected, the installer isn't code-signed yet. Click through it.</label></div>
+  <pre>zdrive-windows-amd64.exe login --url https://staging.zhdrive.in/api</pre>
+  <div class="step"><input type="checkbox" id="sw-3"><label for="sw-3">Browser opens, approve the code. <span class="expect">Expect:</span> session saved, no manual token copying needed.</label></div>
+  <pre>zdrive-windows-amd64.exe mount zdrive: Z: --vfs-cache-mode full</pre>
+  <div class="step"><input type="checkbox" id="sw-4"><label for="sw-4"><span class="expect">Expect:</span> a <code>Z:</code> drive appears in Explorer.</label></div>
+
+  <h3>macOS <span class="tag mac">Mac</span></h3>
+  <pre>xattr -d com.apple.quarantine ./zdrive-macos-arm64   # Intel: zdrive-macos-amd64
+chmod +x ./zdrive-macos-arm64
+./zdrive-macos-arm64 login --url https://staging.zhdrive.in/api</pre>
+  <div class="step"><input type="checkbox" id="sm-1"><label for="sm-1">Browser opens, approve the code. <span class="expect">Expect:</span> session saved.</label></div>
+  <pre>mkdir -p ~/ZDrive
+./zdrive-macos-arm64 nfsmount zdrive: ~/ZDrive --vfs-cache-mode full</pre>
+  <div class="step"><input type="checkbox" id="sm-2"><label for="sm-2"><span class="expect">Expect:</span> <code>~/ZDrive</code> mounts, Finder shows it. No macFUSE install needed (uses the built-in NFS client) — <span class="watch">this itself is worth confirming</span>, it's never been tested on real Apple Silicon before.</label></div>
+
+  <h2>1. Basic read-write (M1/M2) <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s1-1"><label for="s1-1">Create a new folder on the mounted drive.</label></div>
+  <div class="step"><input type="checkbox" id="s1-2"><label for="s1-2">Drag a few real files (mixed types — a photo, a PDF, a text file) into it.</label></div>
+  <div class="step"><input type="checkbox" id="s1-3"><label for="s1-3">Open one in its native app, edit it, save, close.</label></div>
+  <div class="step"><input type="checkbox" id="s1-4"><label for="s1-4">Rename a file and a folder.</label></div>
+  <div class="step"><input type="checkbox" id="s1-5"><label for="s1-5">Delete a file. <span class="expect">Expect:</span> it lands in ZDrive's own trash (check the web app), not permanently gone.</label></div>
+  <div class="step"><input type="checkbox" id="s1-6"><label for="s1-6">Refresh the ZDrive web app (<a href="https://staging.zhdrive.in">staging.zhdrive.in</a>) in a browser — confirm every change above shows up there too.</label></div>
+
+  <h2>2. Folder move (item 9) <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s2-1"><label for="s2-1">Create two folders, A and B, each with a couple of files inside.</label></div>
+  <div class="step"><input type="checkbox" id="s2-2"><label for="s2-2">Drag folder A <em>into</em> folder B (a real cross-parent move, not a rename).</label></div>
+  <div class="step"><input type="checkbox" id="s2-3"><label for="s2-3"><span class="expect">Expect:</span> near-instant — this now calls the real move endpoint instead of moving every file inside one by one. <span class="watch">Time it</span> if you have several files inside; it should not visibly take longer with more files.</label></div>
+
+  <h2>3. Conflict detection (B3) <span class="tag both">Windows + Mac</span> — never tested against a live 409 before</h2>
+  <div class="step"><input type="checkbox" id="s3-1"><label for="s3-1">Open a file on the mount in a text editor, but don't save yet.</label></div>
+  <div class="step"><input type="checkbox" id="s3-2"><label for="s3-2">In the ZDrive web app, upload a new version of that <em>same file</em> (or edit it there if editing is supported) so the server-side revision changes.</label></div>
+  <div class="step"><input type="checkbox" id="s3-3"><label for="s3-3">Now save your local edit from step 1. <span class="expect">Expect:</span> your edit is kept as a separate file named <code>name (conflicted copy &lt;hostname&gt; &lt;date&gt;).ext</code> — the original is NOT silently overwritten.</label></div>
+
+  <h2>4. Editor-save patterns (lock files + atomic saves) <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s4-1"><label for="s4-1">Open a <code>.docx</code> in Word (Windows) or a file in TextEdit/Pages (Mac), edit, save normally.</label></div>
+  <div class="step"><input type="checkbox" id="s4-2"><label for="s4-2"><span class="expect">Expect:</span> this lands as a <em>new version</em> of the original file (check version history in the web app), not a trashed-original-plus-new-file.</label></div>
+  <div class="step"><input type="checkbox" id="s4-3"><label for="s4-3">While the file is open and being edited, check the ZDrive web app — <span class="expect">expect:</span> no stray lock file (<code>~$filename</code> on Windows, <code>.~lock.*#</code> for LibreOffice) ever appears there.</label></div>
+  <div class="step"><input type="checkbox" id="s4-4"><label for="s4-4">(Mac only) Check that <code>.DS_Store</code> never appears in the web app after browsing the mounted folder in Finder.</label></div>
+
+  <h2>5. Large file / multipart upload (B6) <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s5-1"><label for="s5-1">Copy a file ≥50MB onto the mount (a video file is an easy way to get one).</label></div>
+  <div class="step"><input type="checkbox" id="s5-2"><label for="s5-2"><span class="expect">Expect:</span> uploads successfully (may take a bit longer, that's fine) and shows up correctly in the web app with the right file size.</label></div>
+  <div class="step"><input type="checkbox" id="s5-3"><label for="s5-3">If you have something &gt;2GB handy, try that too — this is the case that most needs the multipart path, not the simple one.</label></div>
+
+  <h2>6. Change feed — cross-device sync <span class="tag both">Windows + Mac</span> — never tested live before</h2>
+  <div class="step"><input type="checkbox" id="s6-1"><label for="s6-1">With the drive mounted, leave it idle and open the ZDrive <strong>web app</strong> in a browser (same account).</label></div>
+  <div class="step"><input type="checkbox" id="s6-2"><label for="s6-2">In the web app, create a new file or folder.</label></div>
+  <div class="step"><input type="checkbox" id="s6-3"><label for="s6-3">Within about 30 seconds, check the mounted drive (e.g. refresh Explorer/Finder or run <code>ls</code>/<code>dir</code>) <strong>without</strong> unmounting or restarting. <span class="expect">Expect:</span> the new item appears — this is the change-feed poller picking it up, not the old 5-minute cache-TTL fallback.</label></div>
+  <div class="step"><input type="checkbox" id="s6-4"><label for="s6-4">Repeat in the other direction: create a file on the mount, then refresh the web app — <span class="expect">expect:</span> it shows up there promptly too (this direction doesn't need the poller, just confirms the upload itself completed).</label></div>
+
+  <h2>7. Unmount / quit <span class="tag both">Windows + Mac</span></h2>
+  <div class="step"><input type="checkbox" id="s7-1"><label for="s7-1">Stop the process with Ctrl+C. <span class="expect">Expect:</span> clean exit, drive letter/mount point disappears, no leftover process.</label></div>
+
+  <footer>
+    Report format that's most useful: pass/fail per numbered step, plus anything that felt off even on a "pass." If something fails, include the exact error text or screenshot if you can.
+  </footer>
+</div>
+</body>
+</html>
