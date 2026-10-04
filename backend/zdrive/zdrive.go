@@ -916,6 +916,12 @@ type changesResponse struct {
 // `mount`/`cmount` - so this just runs until the process exits, same as
 // the mount itself does).
 func (f *Fs) pollChanges(ctx context.Context) {
+	// recover() only catches a panic on the goroutine it's deferred in - a
+	// single top-level main() recover would never see this one, since this
+	// goroutine is launched with a bare `go` and nothing joins it. Log the
+	// panic with its stack before re-panicking, so a real bug here still
+	// crashes the process visibly instead of silently vanishing.
+	defer RecoverAndLog("pollChanges")
 	ticker := time.NewTicker(changesPollInterval)
 	defer ticker.Stop()
 	var cursor string
