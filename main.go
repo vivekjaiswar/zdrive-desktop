@@ -5,6 +5,7 @@
 //	zdrive mount zdrive: ~/ZDrive --vfs-cache-mode full        (Linux)
 //	zdrive nfsmount zdrive: ~/ZDrive --vfs-cache-mode full     (macOS, no macFUSE)
 //	zdrive mount zdrive: Z: --vfs-cache-mode full              (Windows, WinFsp)
+//	zdrive pin ~/ZDrive/Reports/Q3.xlsx                         (keep a file always cached, while mounted)
 //
 // `zdrive login` saves type/url/token into rclone's own config file, so no
 // env vars are needed afterward. RCLONE_CONFIG_ZDRIVE_TYPE/_URL/_TOKEN still
@@ -17,6 +18,7 @@ import (
 	_ "github.com/rclone/rclone/backend/local" // VFS cache storage
 	_ "github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
+	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
 
 	"github.com/rclone/rclone/cmd"
 	_ "github.com/rclone/rclone/cmd/cat"
