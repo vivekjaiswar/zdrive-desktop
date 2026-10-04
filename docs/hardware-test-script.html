@@ -66,7 +66,7 @@
 <body>
 <div class="wrap">
   <h1>ZDrive Desktop — Hardware Test Script</h1>
-  <p class="sub">Covers everything merged into <code>main</code> as of 2026-10-04: B1–B6, conflict detection, editor-save handling, folder move, change-feed. Check boxes as you go — this page doesn't save state, so take a screenshot or note results elsewhere when done.</p>
+  <p class="sub">Updated 2026-10-04. Covers everything merged into <code>main</code>, including retry resilience, pin-to-keep-local (new section 8), local event logging, and the Windows installer elevation fix. Check boxes as you go — this page doesn't save state, so take a screenshot or note results elsewhere when done.</p>
 
   <div class="card">
     <strong>Report back, for each platform:</strong> which steps passed, which failed (with the exact error/behavior you saw), and anything that felt slow or wrong even if it "worked."
@@ -75,9 +75,11 @@
   <h2>0. Setup <span class="tag both">Windows + Mac</span></h2>
   <div class="step"><input type="checkbox" id="s0-1"><label for="s0-1">Go to <a href="https://github.com/vivekjaiswar/zdrive-desktop/actions">github.com/vivekjaiswar/zdrive-desktop/actions</a>, open the latest green <code>build</code> run on <code>main</code>, download the <code>zdrive-binaries</code> artifact, unzip it.</label></div>
   <div class="step"><input type="checkbox" id="s0-2"><label for="s0-2">Decide staging vs production for this pass. <strong>Recommended: staging</strong> (<code>--url https://staging.zhdrive.in/api</code> on <code>login</code>) — real production is live and customer-facing.</label></div>
+  <div class="card"><strong>Known fix, PR #6:</strong> if your build predates this merge, the installer requests admin elevation for the whole install, which also elevates the finish page's sign-in step — Chrome (and most browsers) silently refuses to open when launched elevated, so sign-in looks like it does nothing. Once PR #6 is merged and you're on a build built after it, the installer no longer requests elevation up front; only the WinFsp driver step (if needed) shows its own separate UAC prompt.</div>
 
   <h3>Windows <span class="tag win">Windows</span></h3>
-  <div class="step"><input type="checkbox" id="sw-1"><label for="sw-1">Run <code>zdrive-windows-setup.exe</code>. <span class="expect">Expect:</span> installs silently (no separate WinFsp download prompt), offers sign-in on the finish page.</label></div>
+  <div class="step"><input type="checkbox" id="sw-1"><label for="sw-1">Run <code>zdrive-windows-setup.exe</code>. <span class="expect">Expect:</span> no admin/UAC prompt for the installer itself; offers sign-in on the finish page.</label></div>
+  <div class="step"><input type="checkbox" id="sw-1b"><label for="sw-1b"><span class="watch">Watch for:</span> if WinFsp isn't already installed, a separate UAC prompt appears just for it (credited to "Windows Installer", not ZDrive) — approve that one.</label></div>
   <div class="step"><input type="checkbox" id="sw-2"><label for="sw-2"><span class="watch">Watch for:</span> Windows SmartScreen "unknown publisher" warning — expected, the installer isn't code-signed yet. Click through it.</label></div>
   <pre>zdrive-windows-amd64.exe login --url https://staging.zhdrive.in/api</pre>
   <div class="step"><input type="checkbox" id="sw-3"><label for="sw-3">Browser opens, approve the code. <span class="expect">Expect:</span> session saved, no manual token copying needed.</label></div>
@@ -130,6 +132,19 @@ chmod +x ./zdrive-macos-arm64
 
   <h2>7. Unmount / quit <span class="tag both">Windows + Mac</span></h2>
   <div class="step"><input type="checkbox" id="s7-1"><label for="s7-1">Stop the process with Ctrl+C. <span class="expect">Expect:</span> clean exit, drive letter/mount point disappears, no leftover process.</label></div>
+
+  <h2>8. Pin-to-keep-local <span class="tag both">Windows + Mac</span> — tests PR #4, merge it first</h2>
+  <pre>zdrive pin "Z:\Reports\Q3.xlsx"          # Windows
+zdrive pin ~/ZDrive/Reports/Q3.xlsx      # Mac</pre>
+  <div class="step"><input type="checkbox" id="s8-1"><label for="s8-1">With the drive mounted, run the pin command above on a real file on the mount, then <code>zdrive pin --list</code>. <span class="expect">Expect:</span> the file you pinned is listed by its absolute path.</label></div>
+  <div class="step"><input type="checkbox" id="s8-2"><label for="s8-2">Open the pinned file once (forces it to download fully), then disconnect from the network (turn off Wi-Fi/unplug).</label></div>
+  <div class="step"><input type="checkbox" id="s8-3"><label for="s8-3">With the network still off, open the pinned file again. <span class="expect">Expect:</span> it opens instantly with no network error — it's being served from local cache, not re-fetched.</label></div>
+  <div class="step"><input type="checkbox" id="s8-4"><label for="s8-4">Still offline, open a <em>different, unpinned</em> file you haven't opened before. <span class="expect">Expect:</span> this one fails or hangs waiting on the network — confirms the pin is doing something real, not just "everything happens to be cached."</label></div>
+  <div class="step"><input type="checkbox" id="s8-5"><label for="s8-5">Reconnect the network. Copy enough other files onto the mount to push well past your configured cache size (default 10GB — skip this specific check if that's impractical on your hardware).</label></div>
+  <div class="step"><input type="checkbox" id="s8-6"><label for="s8-6"><span class="expect">Expect:</span> the pinned file is still instantly available afterward; other, unpinned files you haven't touched recently may get evicted from local cache (they'll just re-download next time you open them — that's normal, not a bug).</label></div>
+  <div class="step"><input type="checkbox" id="s8-7"><label for="s8-7">Try to delete or rename the pinned file from Explorer/Finder while it's still pinned. <span class="watch">Known open question:</span> Windows/WinFsp may refuse this while a handle is held open — note what actually happens, don't assume it's a bug if it's blocked.</label></div>
+  <pre>zdrive unpin "Z:\Reports\Q3.xlsx"</pre>
+  <div class="step"><input type="checkbox" id="s8-8"><label for="s8-8">Unpin it, confirm <code>zdrive pin --list</code> no longer shows it.</label></div>
 
   <footer>
     Report format that's most useful: pass/fail per numbered step, plus anything that felt off even on a "pass." If something fails, include the exact error text or screenshot if you can.

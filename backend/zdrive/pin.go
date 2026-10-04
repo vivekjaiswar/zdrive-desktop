@@ -165,6 +165,7 @@ func NewPinDaemon(statePath string, maxCacheBytes int64) *PinDaemon {
 // Run blocks until ctx is done, polling the pin-state file and reconciling
 // held handles against it, plus a separate ticker to keep ATimes fresh.
 func (d *PinDaemon) Run(ctx context.Context) {
+	defer RecoverAndLog("pin daemon")
 	d.reconcile() // don't wait out the first poll interval before pinning anything already listed
 	pollTicker := time.NewTicker(pinPollInterval)
 	defer pollTicker.Stop()
