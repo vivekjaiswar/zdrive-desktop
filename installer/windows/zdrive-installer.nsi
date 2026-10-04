@@ -18,8 +18,14 @@
 Name "ZDrive"
 OutFile "zdrive-windows-setup.exe"
 InstallDir "$LOCALAPPDATA\ZDrive"
-; Needed to silently run msiexec for the WinFsp driver install.
-RequestExecutionLevel admin
+; Per-user install, deliberately NOT elevated: msiexec self-elevates on its
+; own for the one piece that actually needs admin (the WinFsp driver, via
+; its own UAC prompt), same as any unprivileged installer bundling an MSI.
+; Elevating the whole installer would also elevate the finish page's
+; "Run zdrive.exe login" step, and Chrome (plus most modern browsers)
+; silently refuses to launch when invoked with an Administrator token -
+; no window, no error, sign-in just appears to do nothing.
+RequestExecutionLevel user
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -59,10 +65,13 @@ Section "Install"
   ; Registers with Windows' "Apps & Features" so it isn't just a leftover
   ; folder - WinFsp itself is left installed on uninstall (a shared system
   ; driver other apps may also depend on), same as e.g. a VC++ redistributable.
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "DisplayName" "ZDrive"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "UninstallString" "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "Publisher" "ZennialHub Technologies"
+  ; HKCU, not HKLM: this is a per-user, unelevated install (see
+  ; RequestExecutionLevel above), and HKCU's own Uninstall key is just as
+  ; visible to "Apps & Features" for the installing user.
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "DisplayName" "ZDrive"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "UninstallString" "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive" "Publisher" "ZennialHub Technologies"
 SectionEnd
 
 Section "Uninstall"
@@ -71,5 +80,5 @@ Section "Uninstall"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\ZDrive\Sign in to ZDrive.lnk"
   RMDir "$SMPROGRAMS\ZDrive"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDrive"
 SectionEnd
