@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/object"
+	"github.com/rclone/rclone/lib/dircache"
+	"github.com/rclone/rclone/lib/rest"
 )
 
 // Fake API: root has folder "Docs" (on page 1) and file "a.txt" (on page 2,
@@ -807,5 +811,156 @@ func TestPollChangesOnceRequestError(t *testing.T) {
 	}
 	if cursor != "some-cursor" {
 		t.Fatalf("cursor = %q, want unchanged %q", cursor, "some-cursor")
+	}
+}
+
+// TestRemoveTreatsRetriedNotFoundAsSuccess: a DELETE that comes back 404
+// means "already gone" (IDs are UUIDs, never reused) - most plausibly our
+// own prior attempt actually succeeded server-side and only the response
+// was lost, but even a concurrent delete from elsewhere should resolve the
+// same way. Either way, Remove must not surface this as an error.
+func TestRemoveTreatsRetriedNotFoundAsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"message":"not found"}`)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &Object{fs: f.(*Fs), remote: "gone.txt", id: "f1"}
+	if err := o.Remove(ctx); err != nil {
+		t.Fatalf("Remove = %v, want nil (a 404 on delete means already gone)", err)
+	}
+}
+
+// TestRmdirTreatsRetriedNotFoundAsSuccess: same reasoning as Remove, for
+// folders - a 404 on the DELETE itself (not the earlier FindDir/listDir
+// pre-checks, which still surface their own real errors normally).
+func TestRmdirTreatsRetriedNotFoundAsSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/list", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("folderId") == "d1" {
+			io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`) // Docs is empty
+			return
+		}
+		io.WriteString(w, `{"folders":[{"id":"d1","name":"Docs"}],"files":[],"nextCursor":null}`)
+	})
+	mux.HandleFunc("/folders/d1", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"message":"not found"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Rmdir(ctx, "Docs"); err != nil {
+		t.Fatalf("Rmdir = %v, want nil (a 404 on delete means already gone)", err)
+	}
+}
+
+// fakeFsWithTransport builds an *Fs exactly like NewFs does, but with a
+// caller-supplied http.RoundTripper instead of a real network client - lets
+// a test simulate a genuine connection-level failure (not just an HTTP
+// status code from a server that's actually reachable), which httptest's
+// normal fake server can't produce on its own.
+func fakeFsWithTransport(t *testing.T, rt http.RoundTripper, baseURL string) *Fs {
+	t.Helper()
+	f := &Fs{
+		name: "zdrive",
+		root: "",
+		srv: rest.NewClient(&http.Client{Transport: rt}).
+			SetRoot(baseURL).
+			SetHeader("Authorization", "Bearer tok").
+			SetHeader("X-ZDrive-Client-Version", ClientVersion).
+			SetErrorHandler(errorHandler),
+	}
+	f.features = (&fs.Features{DuplicateFiles: true, CanHaveEmptyDirectories: true}).Fill(context.Background(), f)
+	f.dirCache = dircache.New(f.root, rootID, f)
+	if err := f.dirCache.FindRoot(context.Background(), false); err != nil {
+		t.Fatalf("FindRoot = %v", err)
+	}
+	return f
+}
+
+// flakyOnceTransport fails the first N requests with a genuine connection-
+// level error (no response at all), then delegates to a real transport.
+type flakyOnceTransport struct {
+	remaining int
+	real      http.RoundTripper
+}
+
+func (t *flakyOnceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.remaining > 0 {
+		t.remaining--
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	}
+	return t.real.RoundTrip(req)
+}
+
+// TestRemoveRetriesPastRealNetworkBlip proves Remove is actually wired
+// through withRetry for a genuine connection failure, not just an HTTP
+// status code - isRetriable/withRetry's own unit tests already prove the
+// retry mechanics in isolation, this proves Remove really uses them.
+func TestRemoveRetriesPastRealNetworkBlip(t *testing.T) {
+	origDelay := retryBaseDelay
+	retryBaseDelay = time.Millisecond
+	defer func() { retryBaseDelay = origDelay }()
+
+	var deleted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			deleted = true
+		}
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	transport := &flakyOnceTransport{remaining: 2, real: http.DefaultTransport}
+	f := fakeFsWithTransport(t, transport, srv.URL)
+	o := &Object{fs: f, remote: "x.txt", id: "f1"}
+
+	if err := o.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove = %v, want it to transparently retry past 2 connection failures", err)
+	}
+	if !deleted {
+		t.Fatal("DELETE never reached the server")
+	}
+}
+
+// TestMoveRetriesPastRealNetworkBlip: same proof for Move's straight-line
+// (non-recovery) path.
+func TestMoveRetriesPastRealNetworkBlip(t *testing.T) {
+	origDelay := retryBaseDelay
+	retryBaseDelay = time.Millisecond
+	defer func() { retryBaseDelay = origDelay }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/drive/list", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`)
+	})
+	mux.HandleFunc("/files/f1", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"id":"f1","size":"5","updatedAt":"2026-10-04T12:00:00Z"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	transport := &flakyOnceTransport{remaining: 2, real: http.DefaultTransport}
+	f := fakeFsWithTransport(t, transport, srv.URL)
+	src := &Object{fs: f, remote: "a.txt", id: "f1", size: 5, modTime: time.Now()}
+
+	dst, err := f.Move(context.Background(), src, "b.txt")
+	if err != nil {
+		t.Fatalf("Move = %v, want it to transparently retry past 2 connection failures", err)
+	}
+	if dst.Remote() != "b.txt" {
+		t.Fatalf("dst.Remote() = %q, want b.txt", dst.Remote())
 	}
 }

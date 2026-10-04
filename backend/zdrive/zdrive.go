@@ -14,6 +14,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rclone/rclone/fs"
@@ -158,15 +160,47 @@ func isConflict(err error) bool {
 
 // isRetriable reports whether err is a transient failure worth retrying:
 // 429 (rate limited - the server explicitly rejected the request, nothing
-// was processed) or a 5xx. Deliberately excludes every other 4xx (400,
-// 401, 403, 404, 409, ...) - retrying those can't fix anything, they're
-// telling us the request itself was wrong, not that timing was bad.
+// was processed) or a 5xx, OR a real network-layer failure where no
+// response ever came back at all (connection refused, DNS failure, a
+// timed-out dial/read). Deliberately excludes every other 4xx (400, 401,
+// 403, 404, 409, ...) - retrying those can't fix anything, they're telling
+// us the request itself was wrong, not that timing was bad.
+//
+// Deliberately does NOT use a bare `net.Error` interface check as the
+// primary test: Go's *url.Error (what a failed http.Client.Do actually
+// returns) unconditionally implements net.Error regardless of cause, so
+// that alone would also mark a bad TLS cert or a malformed URL as
+// retriable - the same class of mistake this function's own doc comment
+// already warns against for HTTP status codes. *net.OpError/*net.DNSError
+// are concrete types that only ever wrap a genuine connection-establishment
+// failure (a TLS/x509 error surfaces as a different, unrelated concrete
+// type and is correctly left alone here); net.Error.Timeout() is checked
+// separately, after the concrete-type checks, for the one case where
+// "genuinely transient" isn't tied to one of those two types.
 func isRetriable(err error) bool {
 	var e *apiError
-	if !errors.As(err, &e) {
+	if errors.As(err, &e) {
+		return e.Status == http.StatusTooManyRequests || e.Status >= 500
+	}
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	return e.Status == http.StatusTooManyRequests || e.Status >= 500
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
 }
 
 // var, not const, so tests can shrink retryBaseDelay to exercise the full
@@ -599,7 +633,14 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 		return fs.ErrorDirectoryNotEmpty
 	}
 	opts := rest.Opts{Method: "DELETE", Path: "/folders/" + dirID}
-	if _, err := f.srv.CallJSON(ctx, &opts, nil, nil); err != nil {
+	err = withRetry(ctx, func() error {
+		_, err := f.srv.CallJSON(ctx, &opts, nil, nil)
+		return err
+	})
+	if err != nil && !isNotFound(err) {
+		// Same reasoning as Object.Remove: a 404 here overwhelmingly means
+		// "already deleted" (our own retry's lost-response case, or a
+		// concurrent delete), not a wrong ID - IDs are UUIDs, never reused.
 		return err
 	}
 	f.dirCache.FlushDir(dir)
@@ -648,6 +689,16 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	// PATCH (rename) must be the one the first PATCH (move) just returned,
 	// not the value we started with - otherwise a real move always makes
 	// the following rename look stale and 409 spuriously.
+	//
+	// Each PATCH is retried individually (not the two combined in one
+	// retry), and only ever retries the SAME request with the SAME
+	// If-Match - never re-entered after a confirmed success, so there's no
+	// risk of retrying against a since-bumped revision. If the move itself
+	// genuinely succeeds but the response is lost, a retry of that same
+	// PATCH 409s (the revision already moved on) rather than silently
+	// double-applying - same accepted, no-data-loss "stale move surfaces a
+	// 409" behavior this project already has for a real conflict, not a
+	// new gap introduced here.
 	rev := revisionOf(srcObj.modTime)
 	if srcDirID != dstDirID {
 		body := map[string]string{} // no folderId = root; the API rejects null
@@ -655,7 +706,10 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 			body["folderId"] = dstDirID
 		}
 		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id + "/move", ExtraHeaders: map[string]string{"If-Match": rev}}
-		if _, err := f.srv.CallJSON(ctx, &opts, body, &file); err != nil {
+		if err := withRetry(ctx, func() error {
+			_, err := f.srv.CallJSON(ctx, &opts, body, &file)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 		if !file.UpdatedAt.IsZero() {
@@ -664,7 +718,10 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 	if srcLeaf != dstLeaf {
 		opts := rest.Opts{Method: "PATCH", Path: "/files/" + srcObj.id, ExtraHeaders: map[string]string{"If-Match": rev}}
-		if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, &file); err != nil {
+		if err := withRetry(ctx, func() error {
+			_, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, &file)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 	}
@@ -756,6 +813,11 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	if err != nil {
 		return err
 	}
+	// Each PATCH below is a "set absolute value" call (parentId, name), not a
+	// delta - retrying the same one is idempotent regardless of whether the
+	// first attempt's response was merely lost, with or without If-Match
+	// (folders have no revision-conflict check at all yet, same pre-existing
+	// gap as files had before B3 - this retry doesn't change that).
 	if srcDirID != dstDirID {
 		// Re-parent via PATCH /folders/:id/move (backend PR #90) - previously
 		// this branch just returned ErrorCantDirMove, which made rclone's VFS
@@ -765,18 +827,27 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 			body["parentId"] = dstDirID
 		}
 		opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID + "/move"}
-		if _, err := f.srv.CallJSON(ctx, &opts, body, nil); err != nil {
+		if err := withRetry(ctx, func() error {
+			_, err := f.srv.CallJSON(ctx, &opts, body, nil)
+			return err
+		}); err != nil {
 			return err
 		}
 		if dstLeaf != srcLeaf {
 			opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID}
-			if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil); err != nil {
+			if err := withRetry(ctx, func() error {
+				_, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil)
+				return err
+			}); err != nil {
 				return err
 			}
 		}
 	} else {
 		opts := rest.Opts{Method: "PATCH", Path: "/folders/" + srcID}
-		if _, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil); err != nil {
+		if err := withRetry(ctx, func() error {
+			_, err := f.srv.CallJSON(ctx, &opts, map[string]string{"name": enc.FromStandardName(dstLeaf)}, nil)
+			return err
+		}); err != nil {
 			return err
 		}
 	}
@@ -1113,7 +1184,18 @@ func (o *Object) Remove(ctx context.Context) error {
 		return nil
 	}
 	opts := rest.Opts{Method: "DELETE", Path: "/files/" + o.id}
-	_, err := o.fs.srv.CallJSON(ctx, &opts, nil, nil)
+	err := withRetry(ctx, func() error {
+		_, err := o.fs.srv.CallJSON(ctx, &opts, nil, nil)
+		return err
+	})
+	if isNotFound(err) {
+		// Already gone - either a concurrent delete, or our own retry's
+		// request actually succeeded server-side and only the response was
+		// lost. IDs are UUIDs (never reused), so a 404 here overwhelmingly
+		// means "already deleted", not "wrong ID" - treat it as success
+		// rather than surfacing a spurious error for a delete that worked.
+		return nil
+	}
 	return err
 }
 

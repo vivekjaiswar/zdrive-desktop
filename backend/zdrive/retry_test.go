@@ -2,10 +2,15 @@ package zdrive
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +33,18 @@ func TestIsRetriable(t *testing.T) {
 		{"409 conflict", &apiError{Status: 409}, false},
 		{"non-apiError", errors.New("boom"), false},
 		{"nil", nil, false},
+		// Real network-layer failures - no response ever came back.
+		{"connection refused (net.OpError)", &url.Error{Op: "Get", URL: "https://x", Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}}, true},
+		{"connection reset directly", syscall.ECONNRESET, true},
+		{"dns failure (net.DNSError)", &url.Error{Op: "Get", URL: "https://x", Err: &net.DNSError{Err: "no such host", IsNotFound: true}}, true},
+		{"timeout", &url.Error{Op: "Get", URL: "https://x", Err: &timeoutError{}}, true},
+		// Things that happen to satisfy net.Error's shape (via url.Error's
+		// own Timeout()/Temporary() forwarding) or look network-ish, but are
+		// NOT a connection-establishment failure - must stay non-retriable,
+		// retrying them can't fix anything.
+		{"bad TLS cert", &url.Error{Op: "Get", URL: "https://x", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
+		{"malformed URL", &url.Error{Op: "parse", URL: "://bad", Err: errors.New("missing protocol scheme")}, false},
+		{"context canceled", context.Canceled, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -37,6 +54,15 @@ func TestIsRetriable(t *testing.T) {
 		})
 	}
 }
+
+// timeoutError is a minimal net.Error whose Timeout() is true but which is
+// NOT a *net.OpError/*net.DNSError - exercises isRetriable's separate,
+// narrower net.Error.Timeout() fallback path.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 func TestWithRetrySucceedsAfterTransientFailures(t *testing.T) {
 	origDelay := retryBaseDelay
