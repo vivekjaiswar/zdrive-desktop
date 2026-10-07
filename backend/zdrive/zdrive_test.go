@@ -374,10 +374,29 @@ func TestSyncSkip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Put(%q) = %v", name, err)
 		}
-		if err := o.Update(ctx, strings.NewReader("more junk"), object.NewStaticObjectInfo(name, time.Now(), 9, true, nil, nil)); err != nil {
+		// Regression: newSkippedObject used to default to size 0 regardless
+		// of the real local file, which rclone's own vfscache writeback
+		// then flagged as "corrupted on transfer" and retried forever.
+		if o.Size() != 4 {
+			t.Fatalf("Put(%q).Size() = %d, want 4 (matching the real local file)", name, o.Size())
+		}
+
+		moved, err := f.Features().Move(ctx, o, "moved-"+name)
+		if err != nil {
+			t.Fatalf("Move(%q) = %v", name, err)
+		}
+		if moved.Size() != 4 {
+			t.Fatalf("Move(%q).Size() = %d, want 4 (carried over from the source)", name, moved.Size())
+		}
+		mo := moved.(*Object)
+
+		if err := mo.Update(ctx, strings.NewReader("more junk"), object.NewStaticObjectInfo(name, time.Now(), 9, true, nil, nil)); err != nil {
 			t.Fatalf("Update(%q) = %v", name, err)
 		}
-		if err := o.Remove(ctx); err != nil {
+		if mo.Size() != 9 {
+			t.Fatalf("Update(%q).Size() = %d, want 9 (matching the rewritten local file)", name, mo.Size())
+		}
+		if err := mo.Remove(ctx); err != nil {
 			t.Fatalf("Remove(%q) = %v", name, err)
 		}
 	}

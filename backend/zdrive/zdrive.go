@@ -372,8 +372,11 @@ func (f *Fs) newObject(remote string, file apiFile) *Object {
 // newSkippedObject represents a syncSkip file: it exists only in the local
 // VFS cache (id "") and is never read from or written to the API. Object
 // methods check for the empty id and no-op instead of calling the backend.
-func (f *Fs) newSkippedObject(remote string) *Object {
-	return &Object{fs: f, remote: remote, modTime: time.Now()}
+// size must match the real local file's size - rclone's own vfscache
+// writeback compares this against the local cache file post-"upload" and
+// treats any mismatch as a corrupted transfer, retrying forever otherwise.
+func (f *Fs) newSkippedObject(remote string, size int64) *Object {
+	return &Object{fs: f, remote: remote, size: size, modTime: time.Now()}
 }
 
 // NewObject finds the file at remote.
@@ -448,7 +451,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	}
 	if syncSkip(leaf) {
 		_, _ = io.Copy(io.Discard, in) // drain so the VFS write-back doesn't block on us
-		return f.newSkippedObject(src.Remote()), nil
+		return f.newSkippedObject(src.Remote(), src.Size()), nil
 	}
 	if src.Size() >= largeUploadMinBytes {
 		if obj, ok, err := f.putLarge(ctx, in, src, leaf, dirID); ok {
@@ -665,7 +668,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, fs.ErrorCantMove
 	}
 	if srcObj.id == "" { // syncSkip file (lock/swap/OS metadata) - never touches the API
-		return f.newSkippedObject(remote), nil
+		return f.newSkippedObject(remote, srcObj.size), nil
 	}
 	srcLeaf, srcDirID, err := srcObj.fs.dirCache.FindPath(ctx, srcObj.remote, false)
 	if err != nil {
@@ -1046,6 +1049,7 @@ func dirOfRemote(remote string) string {
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	if o.id == "" { // syncSkip file - stays local-only
 		_, _ = io.Copy(io.Discard, in)
+		o.size = src.Size() // same reason as newSkippedObject: must match the real rewrite, or writeback sees a false "corrupted transfer" forever
 		return nil
 	}
 
