@@ -1,4 +1,4 @@
-package pin
+package zdrive
 
 import "testing"
 
@@ -18,8 +18,8 @@ func TestIsMountCommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isMountCommand(c.name); got != c.want {
-				t.Errorf("isMountCommand(%q) = %v, want %v", c.name, got, c.want)
+			if got := IsMountCommand(c.name); got != c.want {
+				t.Errorf("IsMountCommand(%q) = %v, want %v", c.name, got, c.want)
 			}
 		})
 	}

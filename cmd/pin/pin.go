@@ -39,7 +39,7 @@ func init() {
 				return err
 			}
 		}
-		if !isMountCommand(command.Name()) {
+		if !zdrive.IsMountCommand(command.Name()) {
 			return nil
 		}
 		setDefaultCacheQuota(command)
@@ -48,20 +48,6 @@ func init() {
 		go daemon.Run(context.Background())
 		return nil
 	}
-}
-
-// isMountCommand matches the three mount-shaped subcommands this project
-// registers (cmd/mount, cmd/cmount, cmd/nfsmount) - confirmed via the
-// vendored source that on non-Linux platforms cmount actually registers
-// itself AS "mount" (with "cmount" kept only as an alias), so checking
-// command.Name() against all three names is correct regardless of
-// platform or which alias the user typed.
-func isMountCommand(name string) bool {
-	switch name {
-	case "mount", "cmount", "nfsmount":
-		return true
-	}
-	return false
 }
 
 // setDefaultCacheQuota wires --vfs-cache-max-size's own already-stated
