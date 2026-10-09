@@ -5,6 +5,7 @@ package autostart
 import (
 	"fmt"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -75,48 +76,14 @@ func isInstalled() (registeredPath string, ok bool, err error) {
 
 // quoteWindowsCommandLine builds a single command-line string the way
 // CommandLineToArgvW (and so the Run key launcher) parses it back apart -
-// each argument individually quoted/escaped, not just joined with
-// spaces, so e.g. a mountpoint path containing a space still round-trips
-// as one argument.
+// each argument individually escaped via syscall.EscapeArg (same MSDN
+// algorithm CreateProcess itself expects), not just joined with spaces,
+// so e.g. a mountpoint path containing a space still round-trips as one
+// argument.
 func quoteWindowsCommandLine(args []string) string {
 	quoted := make([]string, len(args))
 	for i, a := range args {
-		quoted[i] = quoteWindowsArg(a)
+		quoted[i] = syscall.EscapeArg(a)
 	}
 	return strings.Join(quoted, " ")
-}
-
-// quoteWindowsArg implements the standard Win32 argv-quoting algorithm
-// (same rules as Python's subprocess.list2cmdline and Go's own unexported
-// os/exec windows helper): a backslash run is only doubled when it
-// directly precedes a literal quote (which itself needs one more
-// backslash to escape); backslashes anywhere else are left exactly as
-// written.
-func quoteWindowsArg(s string) string {
-	if s != "" && !strings.ContainsAny(s, " \t\n\v\"") {
-		return s
-	}
-	var b strings.Builder
-	b.WriteByte('"')
-	for i := 0; i < len(s); {
-		start := i
-		for i < len(s) && s[i] == '\\' {
-			i++
-		}
-		n := i - start
-		switch {
-		case i == len(s):
-			b.WriteString(strings.Repeat(`\`, n*2))
-		case s[i] == '"':
-			b.WriteString(strings.Repeat(`\`, n*2+1))
-			b.WriteByte('"')
-			i++
-		default:
-			b.WriteString(strings.Repeat(`\`, n))
-			b.WriteByte(s[i])
-			i++
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }
