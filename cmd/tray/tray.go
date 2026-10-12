@@ -30,25 +30,11 @@ func init() {
 				return err
 			}
 		}
-		if isMountCommand(command.Name()) {
+		if zdrive.IsMountCommand(command.Name()) {
 			go runTray()
 		}
 		return nil
 	}
-}
-
-// isMountCommand matches the three mount-shaped subcommands this project
-// registers (cmd/mount, cmd/cmount, cmd/nfsmount). Duplicated from
-// cmd/pin's own original copy rather than depending on the in-flight
-// autostart PR's zdrive.IsMountCommand promotion - these two PRs are
-// independent and may merge in either order; switch this to the shared
-// helper once autostart lands first.
-func isMountCommand(name string) bool {
-	switch name {
-	case "mount", "cmount", "nfsmount":
-		return true
-	}
-	return false
 }
 
 func runTray() {
