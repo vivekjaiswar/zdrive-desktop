@@ -7,6 +7,12 @@
 //	zdrive mount zdrive: Z: --vfs-cache-mode full              (Windows, WinFsp)
 //	zdrive pin ~/ZDrive/Reports/Q3.xlsx                         (keep a file always cached, while mounted)
 //
+// The first time any mount command above actually runs, it's also
+// registered to launch automatically at login (Windows/Mac only - see
+// cmd/autostart). Manage this with:
+//
+//	zdrive autostart uninstall                                  (stop launching automatically)
+//
 // `zdrive login` saves type/url/token into rclone's own config file, so no
 // env vars are needed afterward. RCLONE_CONFIG_ZDRIVE_TYPE/_URL/_TOKEN still
 // work too (env vars win over the config file) - useful for CI/testing.
@@ -17,6 +23,7 @@ import (
 
 	_ "github.com/rclone/rclone/backend/local" // VFS cache storage
 	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
+	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/autostart"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
 
