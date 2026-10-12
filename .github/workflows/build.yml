@@ -14,8 +14,6 @@ jobs:
       - run: go test ./...
       - run: |
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags cmount -o dist/zdrive-windows-amd64.exe .
-          GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -o dist/zdrive-macos-arm64 .
-          GOOS=darwin  GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-macos-amd64 .
           GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-linux-amd64 .
       # A single-file Windows installer: bundles WinFsp and silently installs
       # it only if missing, so a user only ever downloads one exe (no
@@ -37,3 +35,22 @@ jobs:
           rm dist/winfsp.msi
       - uses: actions/upload-artifact@v4
         with: { name: zdrive-binaries, path: dist/ }
+
+  # Separate, native runner (not cross-compiled from Linux) - a future tray
+  # icon (M4) and the macOS .pkg installer (pkgbuild) both need real macOS
+  # tooling/cgo, which ubuntu-latest can't provide. arm64 is this runner's
+  # native arch; amd64 cross-compiles via Xcode's own clang (unlike a
+  # cross-OS target, Apple's toolchain already supports both arches without
+  # a separate cross C compiler).
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: go test ./...
+      - run: |
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o dist/zdrive-macos-arm64 .
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o dist/zdrive-macos-amd64 .
+      - uses: actions/upload-artifact@v4
+        with: { name: zdrive-macos-binaries, path: dist/ }
