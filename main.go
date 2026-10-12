@@ -19,6 +19,7 @@ import (
 	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
+	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/tray"
 
 	"github.com/rclone/rclone/cmd"
 	_ "github.com/rclone/rclone/cmd/cat"

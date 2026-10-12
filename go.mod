@@ -3,6 +3,7 @@ module github.com/vivekjaiswar/zdrive-desktop
 go 1.27.1
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/rclone/rclone v1.75.1
 	github.com/spf13/cobra v1.10.2
 )
@@ -23,6 +24,7 @@ require (
 	github.com/go-darwin/apfs v0.0.0-20211011131704-f84b94dbf348 // indirect
 	github.com/go-git/go-billy/v5 v5.9.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gopherjs/gopherjs v1.21.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
