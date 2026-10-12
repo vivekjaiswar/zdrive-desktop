@@ -52,5 +52,31 @@ jobs:
       - run: |
           GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o dist/zdrive-macos-arm64 .
           GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o dist/zdrive-macos-amd64 .
+      # One-file .pkg per arch (no universal binary/lipo - matches the raw
+      # binaries above, already shipped as separate arch-specific files).
+      # No bundled driver needed here, unlike Windows/WinFsp - this project
+      # mounts on macOS via the OS's own built-in NFS client. No postinstall
+      # script either: pkgbuild's own payload mechanism places a file at
+      # --install-location with whatever permissions it already has in
+      # --root, which already covers "install this one executable" with
+      # nothing extra to script. (LaunchAgent registration for autostart
+      # happens on first `zdrive mount` run, not from this installer - see
+      # cmd/autostart - so root-run postinstall scripts never need to touch
+      # a user's home directory.)
+      - name: Build macOS .pkg installers
+        run: |
+          VERSION=$(sed -n 's/.*ClientVersion = "\(.*\)"/\1/p' backend/zdrive/zdrive.go | head -1)
+          for ARCH in arm64 amd64; do
+            rm -rf pkgroot && mkdir pkgroot
+            cp "dist/zdrive-macos-$ARCH" pkgroot/zdrive
+            chmod +x pkgroot/zdrive
+            pkgbuild \
+              --root pkgroot \
+              --identifier com.zennialhub.zdrive \
+              --version "$VERSION" \
+              --install-location /usr/local/bin \
+              "dist/zdrive-macos-$ARCH.pkg"
+          done
+          rm -rf pkgroot
       - uses: actions/upload-artifact@v4
         with: { name: zdrive-macos-binaries, path: dist/ }
