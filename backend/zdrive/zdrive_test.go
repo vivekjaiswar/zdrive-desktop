@@ -833,6 +833,44 @@ func TestPollChangesOnceRequestError(t *testing.T) {
 	}
 }
 
+// TestPollChangesOnceCapturesLatestVersionHeader: the auto-update check
+// (M4) piggybacks on this already-running poll rather than a separate
+// request - a response carrying X-ZDrive-Latest-Version should update
+// LatestKnownVersion(); one without it should leave the prior value
+// alone (a response that simply doesn't carry the header isn't the same
+// as the backend announcing "no update available").
+func TestPollChangesOnceCapturesLatestVersionHeader(t *testing.T) {
+	SetLatestKnownVersion("")
+	defer SetLatestKnownVersion("")
+
+	sendHeader := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sendHeader {
+			w.Header().Set("X-ZDrive-Latest-Version", "9.9.9")
+		}
+		io.WriteString(w, `{"files":[],"folders":[],"deletedFileIds":[],"deletedFolderIds":[],"nextCursor":""}`)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	fsIface, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fsIface.(*Fs)
+
+	f.pollChangesOnce(ctx, "")
+	if got := LatestKnownVersion(); got != "9.9.9" {
+		t.Fatalf("LatestKnownVersion() = %q, want 9.9.9", got)
+	}
+
+	sendHeader = false
+	f.pollChangesOnce(ctx, "")
+	if got := LatestKnownVersion(); got != "9.9.9" {
+		t.Fatalf("LatestKnownVersion() = %q after a response with no header, want it to stay 9.9.9", got)
+	}
+}
+
 // TestRemoveTreatsRetriedNotFoundAsSuccess: a DELETE that comes back 404
 // means "already gone" (IDs are UUIDs, never reused) - most plausibly our
 // own prior attempt actually succeeded server-side and only the response

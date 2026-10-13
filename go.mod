@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	fyne.io/systray v1.12.2
+	github.com/coreos/go-semver v0.3.1
 	github.com/rclone/rclone v1.75.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.47.0
@@ -18,7 +19,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.6.0 // indirect
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/go-chi/chi/v5 v5.3.1 // indirect

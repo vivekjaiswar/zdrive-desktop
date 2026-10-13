@@ -12,15 +12,25 @@ package tray
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"fyne.io/systray"
 	"github.com/rclone/rclone/cmd"
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/spf13/cobra"
 	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
 )
+
+// updateCheckInterval controls how often the tray looks at the version
+// the backend's most recently mentioned (see LatestKnownVersion,
+// refreshed by the already-running 30s change-feed poll) and, if it's
+// newer, downloads+verifies it. An hour is deliberately not aggressive -
+// this is a background check, not a user-initiated action.
+const updateCheckInterval = time.Hour
 
 func init() {
 	prevPreRun := cmd.Root.PersistentPreRunE
@@ -39,6 +49,7 @@ func init() {
 
 func runTray() {
 	defer zdrive.RecoverAndLog("tray")
+	cleanupOldBinary() // no-op on macOS - only Windows's swap leaves one behind, see update_windows.go
 	systray.Run(onReady, func() {})
 }
 
@@ -50,17 +61,86 @@ func onReady() {
 	status.Disable() // informational only - optimistic "running" for v1, not a live health check
 	systray.AddSeparator()
 	openItem := systray.AddMenuItem("Open web app", "Open the ZDrive web app in your browser")
+	updateItem := systray.AddMenuItem("Restart to finish updating", "A new version has been downloaded and verified")
+	updateItem.Hide() // only shown once an update is actually staged
 	quitItem := systray.AddMenuItem("Quit", "Unmount and quit ZDrive")
+
+	var stagedPath string
+	ticker := time.NewTicker(updateCheckInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-openItem.ClickedCh:
 			openWebApp()
+		case <-updateItem.ClickedCh:
+			if stagedPath == "" {
+				continue // menu item is hidden until staged, but guard anyway
+			}
+			if applyStagedUpdate(stagedPath) {
+				return
+			}
+			// Apply failed (already logged inside) - un-stage so the next
+			// tick can try again from scratch rather than repeatedly
+			// retrying a swap that just failed.
+			stagedPath = ""
+			updateItem.Hide()
 		case <-quitItem.ClickedCh:
 			quitMount()
 			return
+		case <-ticker.C:
+			if stagedPath == "" {
+				if path := checkAndStageUpdate(); path != "" {
+					stagedPath = path
+					updateItem.Show()
+				}
+			}
 		}
 	}
+}
+
+// checkAndStageUpdate compares the most recently backend-reported
+// version (LatestKnownVersion, refreshed by the existing change-feed
+// poll - see backend/zdrive/update.go) against this binary's own
+// compiled-in version, and if newer, downloads+verifies it into the same
+// directory the running binary lives in. Does NOT apply or restart
+// anything - that only happens once the user clicks the menu item,
+// deliberately: silently swapping and restarting while a drive is
+// actively mounted risks the exact Finder/Explorer-hang failure mode
+// kernel-adjacent software is prone to.
+func checkAndStageUpdate() string {
+	latest := zdrive.LatestKnownVersion()
+	if !zdrive.IsUpdateAvailable(latest) {
+		return ""
+	}
+	execPath, err := os.Executable()
+	if err != nil {
+		fs.Logf(nil, "auto-update: couldn't resolve this binary's own path: %v", err)
+		return ""
+	}
+	stagedPath, err := zdrive.DownloadRelease(latest, filepath.Dir(execPath))
+	if err != nil {
+		fs.Logf(nil, "auto-update: failed to download/verify v%s: %v", latest, err)
+		return ""
+	}
+	return stagedPath
+}
+
+// applyStagedUpdate swaps in the already-verified binary at stagedPath
+// and launches it, then quits this (old) process - returns false (and
+// logs) on failure, leaving the old process running untouched.
+func applyStagedUpdate(stagedPath string) bool {
+	execPath, err := os.Executable()
+	if err != nil {
+		fs.Logf(nil, "auto-update: couldn't resolve this binary's own path: %v", err)
+		return false
+	}
+	if err := applyUpdate(execPath, stagedPath); err != nil {
+		fs.Logf(nil, "auto-update: failed to apply staged update: %v", err)
+		return false
+	}
+	quitMount()
+	return true
 }
 
 // openWebApp derives the web app's URL from the same saved login config
