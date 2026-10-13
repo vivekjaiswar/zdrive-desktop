@@ -132,6 +132,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh release create infers the target repo from the local git
+      # remote - without a checkout, there's no .git directory at all and
+      # it fails with "not a git repository" (confirmed by hitting this
+      # for real on the v0.3.0 tag push). --generate-notes also needs the
+      # actual commit history to build release notes from.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: zdrive-binaries, path: dist }
       - uses: actions/download-artifact@v4
