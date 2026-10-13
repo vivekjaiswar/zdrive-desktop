@@ -75,7 +75,16 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; Tears down the autostart Run-key registration (cmd/autostart) before
+  ; deleting the exe it points at - run while the binary still exists,
+  ; not after, since this shells out to it.
+  ExecWait '"$INSTDIR\${ZDRIVE_EXE}" autostart uninstall'
+
   Delete "$INSTDIR\${ZDRIVE_EXE}"
+  ; A leftover from the auto-update swap (cmd/tray/update_windows.go),
+  ; if the user never relaunched after an update before uninstalling -
+  ; that cleanup normally happens on next run, which never came.
+  Delete "$INSTDIR\${ZDRIVE_EXE}.old"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\ZDrive\Sign in to ZDrive.lnk"
