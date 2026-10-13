@@ -956,9 +956,18 @@ func (f *Fs) pollChangesOnce(ctx context.Context, cursor string) (nextCursor str
 	}
 	var resp changesResponse
 	opts := rest.Opts{Method: "GET", Path: "/drive/changes", Parameters: params}
-	if _, err := f.srv.CallJSON(ctx, &opts, nil, &resp); err != nil {
+	httpResp, err := f.srv.CallJSON(ctx, &opts, nil, &resp)
+	if err != nil {
 		fs.Debugf(f, "poll changes: %v", err)
 		return cursor, false
+	}
+	// Piggybacks the auto-update check (M4) on this already-running,
+	// already-authenticated poll rather than a separate periodic request -
+	// see DesktopClientVersionGuard server-side for where this is set.
+	if httpResp != nil {
+		if latest := httpResp.Header.Get("X-ZDrive-Latest-Version"); latest != "" {
+			SetLatestKnownVersion(latest)
+		}
 	}
 	if len(resp.Files) > 0 || len(resp.Folders) > 0 ||
 		len(resp.DeletedFileIDs) > 0 || len(resp.DeletedFolderIDs) > 0 {
