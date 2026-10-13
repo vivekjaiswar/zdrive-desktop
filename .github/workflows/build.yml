@@ -1,5 +1,14 @@
 name: build
-on: [push, workflow_dispatch]
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      beta_suffix:
+        description: >-
+          Set to build an opt-in beta (e.g. "1" bakes in a "-beta.1"
+          version suffix). Leave empty for a normal/stable manual build.
+        required: false
+        default: ""
 env:
   # Bump when a newer WinFsp release is wanted - installer/windows never
   # needs to change, it just takes the filename as a build parameter.
@@ -12,9 +21,24 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go test ./...
+      # Beta channel (M4-PR-5, OQ16): a workflow_dispatch run with
+      # beta_suffix set bakes a "-beta.N" version into the binary via
+      # -ldflags -X, not by editing the source file per beta build.
+      # ClientVersion is a var specifically to allow this override - see
+      # its own comment in backend/zdrive/zdrive.go. Empty LDFLAGS on a
+      # normal push is harmless; go build accepts an empty -ldflags value.
+      - name: Compute version (beta channel support)
+        run: |
+          BASE_VERSION=$(sed -n 's/.*ClientVersion = "\(.*\)"/\1/p' backend/zdrive/zdrive.go | head -1)
+          VERSION="$BASE_VERSION"
+          if [ -n "${{ github.event.inputs.beta_suffix }}" ]; then
+            VERSION="${BASE_VERSION}-beta.${{ github.event.inputs.beta_suffix }}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-X github.com/vivekjaiswar/zdrive-desktop/backend/zdrive.ClientVersion=$VERSION" >> "$GITHUB_ENV"
       - run: |
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags cmount -o dist/zdrive-windows-amd64.exe .
-          GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -o dist/zdrive-linux-amd64 .
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags cmount -ldflags "$LDFLAGS" -o dist/zdrive-windows-amd64.exe .
+          GOOS=linux   GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o dist/zdrive-linux-amd64 .
       # A single-file Windows installer: bundles WinFsp and silently installs
       # it only if missing, so a user only ever downloads one exe (no
       # separate WinFsp download/install step). See installer/windows for why
@@ -49,9 +73,22 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go test ./...
+      # Same beta-channel version override as the build job above - see
+      # its comment. Duplicated rather than shared across jobs (a job
+      # output would need its own small job just to host this) since
+      # it's a few lines and these two jobs are otherwise independent.
+      - name: Compute version (beta channel support)
+        run: |
+          BASE_VERSION=$(sed -n 's/.*ClientVersion = "\(.*\)"/\1/p' backend/zdrive/zdrive.go | head -1)
+          VERSION="$BASE_VERSION"
+          if [ -n "${{ github.event.inputs.beta_suffix }}" ]; then
+            VERSION="${BASE_VERSION}-beta.${{ github.event.inputs.beta_suffix }}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-X github.com/vivekjaiswar/zdrive-desktop/backend/zdrive.ClientVersion=$VERSION" >> "$GITHUB_ENV"
       - run: |
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o dist/zdrive-macos-arm64 .
-          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o dist/zdrive-macos-amd64 .
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o dist/zdrive-macos-arm64 .
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o dist/zdrive-macos-amd64 .
       # One-file .pkg per arch (no universal binary/lipo - matches the raw
       # binaries above, already shipped as separate arch-specific files).
       # No bundled driver needed here, unlike Windows/WinFsp - this project
@@ -65,7 +102,9 @@ jobs:
       # a user's home directory.)
       - name: Build macOS .pkg installers
         run: |
-          VERSION=$(sed -n 's/.*ClientVersion = "\(.*\)"/\1/p' backend/zdrive/zdrive.go | head -1)
+          # $VERSION already computed above (includes the beta suffix,
+          # if any) - reused here so the .pkg's own version metadata
+          # matches what's actually baked into the binary inside it.
           for ARCH in arm64 amd64; do
             rm -rf pkgroot && mkdir pkgroot
             cp "dist/zdrive-macos-$ARCH" pkgroot/zdrive
