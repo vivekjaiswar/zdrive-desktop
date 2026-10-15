@@ -120,6 +120,44 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: zdrive-macos-binaries, path: dist/ }
 
+  # Staging: every push to main (i.e. every merged PR) auto-publishes a
+  # moving "staging" pre-release pointing at the latest main commit - the
+  # desktop-client equivalent of the web app's auto-deployed sandbox, so
+  # there's always a fresh, durable link to download and test the latest
+  # merged code without waiting for a version bump + tag. Marked
+  # --prerelease so GitHub's own "latest release" view skips it; the Go
+  # client's own auto-update check is entirely backend-driven
+  # (LatestKnownVersion via the X-ZDrive-Latest-Version header, not a
+  # GitHub API scan) and never references this tag, so staging can never
+  # reach real users by itself. Cutting an actual stable release for
+  # everyone is still the separate, deliberate "push a v* tag" step below.
+  release-staging:
+    runs-on: ubuntu-latest
+    needs: [build, build-macos]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: zdrive-binaries, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: zdrive-macos-binaries, path: dist }
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+      - name: Publish staging pre-release (moving tag, always overwritten)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete staging --yes --cleanup-tag || true
+          gh release create staging dist/* \
+            --title "staging (latest main: ${GITHUB_SHA::7})" \
+            --notes "Auto-built from $(git log -1 --format='%H %s')" \
+            --prerelease \
+            --target main
+
   # Tag-triggered only (push a "v*" tag to cut a release) - CI's own
   # upload-artifact downloads are time-limited, not a durable versioned
   # URL a field client could fetch from months later. A GitHub Release is
