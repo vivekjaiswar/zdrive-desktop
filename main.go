@@ -26,6 +26,7 @@ import (
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/autostart"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
+	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/shutdownwait"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/tray"
 
 	"github.com/rclone/rclone/cmd"
