@@ -41,22 +41,19 @@ func init() {
 				return err
 			}
 		}
-		// macOS's systray backend drives real Cocoa/AppKit APIs via cgo,
-		// which (like all AppKit calls) must run on the actual main OS
-		// thread - calling Run() from a spawned goroutine, as this used
-		// to do unconditionally, crashes with a bare SIGTRAP inside
-		// nativeLoop on first real Apple Silicon hardware (confirmed
-		// 2026-10-14; fyne.io/systray's own README example only ever
-		// calls Run() from main() directly, never go Run()). Properly
-		// fixing this means inverting this program's control flow on
-		// macOS specifically - systray.Run() owning the real main
-		// goroutine, with cobra's command execution moved into its
-		// onReady callback - too large a change to land alongside a
-		// one-line crash fix. Disabling tray on macOS until that's done
-		// is a real regression (no tray icon at all on Mac for now), but
-		// a missing icon beats a crash on every single mount attempt.
-		// Windows' backend has no such thread restriction and is
-		// unaffected.
+		// macOS is deliberately excluded here: fyne.io/systray's macOS
+		// backend drives real Cocoa/AppKit APIs via cgo, which must run
+		// on the actual main OS thread - calling Run() from a goroutine
+		// spawned from this hook (as this used to do unconditionally)
+		// crashed with a bare SIGTRAP on real Apple Silicon hardware
+		// (confirmed 2026-10-14). The tray there is instead started
+		// earlier and differently, from main() itself via
+		// cmd/tray/entrypoint_darwin.go's RunMain - owning the real main
+		// goroutine before cobra ever dispatches to this hook, with
+		// cmd.Main() (and everything below it, including this hook)
+		// running on a spawned goroutine instead. Spawning a second tray
+		// here for darwin would just double it. Windows' backend has no
+		// such thread restriction, so this hook is its only/correct path.
 		if zdrive.IsMountCommand(command.Name()) && runtime.GOOS != "darwin" {
 			go runTray()
 		}
