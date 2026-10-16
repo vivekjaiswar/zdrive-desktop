@@ -27,7 +27,7 @@ import (
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/shutdownwait"
-	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/tray"
+	"github.com/vivekjaiswar/zdrive-desktop/cmd/tray"
 
 	"github.com/rclone/rclone/cmd"
 	_ "github.com/rclone/rclone/cmd/cat"
@@ -46,5 +46,9 @@ func main() {
 	// As early as possible, before any command runs - so a failure in
 	// *any* command (not just mount) still lands in the local event log.
 	zdrive.SetupEventLogging(zdrive.EventLogPath(config.GetConfigPath()))
-	cmd.Main()
+	// tray.RunMain is the real entrypoint, not cmd.Main() directly: on
+	// macOS specifically, a mount command needs systray's own event loop
+	// to own this actual main goroutine (see cmd/tray/entrypoint_darwin.go)
+	// - everywhere else it's a direct passthrough to cmd.Main().
+	tray.RunMain(cmd.Main)
 }
