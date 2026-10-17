@@ -39,16 +39,30 @@ polls until approved and saves the resulting token into rclone's
 config under the "zdrive" remote - so "zdrive mount zdrive: <path>"
 works afterwards with no env vars needed.`,
 	RunE: func(command *cobra.Command, args []string) error {
-		if err := doLogin(context.Background(), apiURL, time.Sleep, saveToken); err != nil {
-			return err
+		err := doLogin(context.Background(), apiURL, time.Sleep, saveToken)
+		if err == nil {
+			// Windows/macOS only (see automount_<os>.go) - a non-technical
+			// user shouldn't need a terminal for anything beyond whatever
+			// already ran "zdrive login" itself (the installer's finish
+			// page). No-op on Linux, where a manual "zdrive mount" is still
+			// the expected workflow.
+			autoMountAfterLogin()
 		}
-		// Windows/macOS only (see automount_<os>.go) - a non-technical
-		// user shouldn't need a terminal for anything beyond whatever
-		// already ran "zdrive login" itself (the installer's finish
-		// page). No-op on Linux, where a manual "zdrive mount" is still
-		// the expected workflow.
-		autoMountAfterLogin()
-		return nil
+		if shouldPauseOnExit() {
+			// Windows only, and only for a freshly-allocated console (see
+			// pause_windows.go) - print the error ourselves and pause,
+			// rather than letting cmd.Main()'s own error path flash it
+			// and exit before anyone can read it. Swallowing the error
+			// here (returning nil) is scoped to exactly this case, so
+			// exit codes for any scripted/CI "zdrive login" invocation
+			// are completely unaffected.
+			if err != nil {
+				fmt.Println("Error:", err)
+			}
+			pauseForEnter()
+			return nil
+		}
+		return err
 	},
 }
 
