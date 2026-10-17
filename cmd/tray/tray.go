@@ -1,16 +1,19 @@
 //go:build windows || darwin
 
-// Package tray shows a minimal system-tray icon (status/quit/open web
-// app) while a mount is running - the no-Qt-GUI decision in docs/PLAN.md
-// draws the line here deliberately: no account-management UI, just
-// enough to know it's running and reach for Quit. Windows and macOS
-// only; tray_linux.go is an empty stub so main.go's unconditional blank
-// import still compiles on Linux (dev-only for this project, and
-// systray's Linux backend would need a D-Bus session that isn't worth
-// pulling in for that audience).
+// Package tray shows a minimal system-tray icon (status, plan/storage,
+// quit, open web app) while a mount is running - the no-Qt-GUI decision
+// in docs/PLAN.md draws the line here deliberately: no account
+// *management* UI (upgrading, inviting users, etc. all stay on the web
+// app, reached via the "Manage billing" link), just enough to glance at
+// without opening a browser. Windows and macOS only; tray_linux.go is an
+// empty stub so main.go's unconditional blank import still compiles on
+// Linux (dev-only for this project, and systray's Linux backend would
+// need a D-Bus session that isn't worth pulling in for that audience).
 package tray
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +35,13 @@ import (
 // newer, downloads+verifies it. An hour is deliberately not aggressive -
 // this is a background check, not a user-initiated action.
 const updateCheckInterval = time.Hour
+
+// accountRefreshInterval controls how often the tray re-fetches plan/
+// storage info. More frequent than the update check (that data actually
+// changes as someone uploads files or changes plans) but still a
+// background poll, not tied to the 30s change-feed poll which is about
+// file sync, not account state.
+const accountRefreshInterval = 5 * time.Minute
 
 func init() {
 	prevPreRun := cmd.Root.PersistentPreRunE
@@ -73,20 +83,30 @@ func onReady() {
 
 	status := systray.AddMenuItem("Mounted", "")
 	status.Disable() // informational only - optimistic "running" for v1, not a live health check
+	planItem := systray.AddMenuItem("Plan: -", "")
+	planItem.Disable()
+	storageItem := systray.AddMenuItem("Storage: -", "")
+	storageItem.Disable()
 	systray.AddSeparator()
+	billingItem := systray.AddMenuItem("Manage billing", "Open the ZDrive billing page in your browser")
 	openItem := systray.AddMenuItem("Open web app", "Open the ZDrive web app in your browser")
 	updateItem := systray.AddMenuItem("Restart to finish updating", "A new version has been downloaded and verified")
 	updateItem.Hide() // only shown once an update is actually staged
 	quitItem := systray.AddMenuItem("Quit", "Unmount and quit ZDrive")
 
 	var stagedPath string
-	ticker := time.NewTicker(updateCheckInterval)
-	defer ticker.Stop()
+	updateTicker := time.NewTicker(updateCheckInterval)
+	defer updateTicker.Stop()
+	accountTicker := time.NewTicker(accountRefreshInterval)
+	defer accountTicker.Stop()
+	refreshAccountInfo(planItem, storageItem)
 
 	for {
 		select {
 		case <-openItem.ClickedCh:
-			openWebApp()
+			openWebApp("")
+		case <-billingItem.ClickedCh:
+			openWebApp("/billing")
 		case <-updateItem.ClickedCh:
 			if stagedPath == "" {
 				continue // menu item is hidden until staged, but guard anyway
@@ -102,15 +122,34 @@ func onReady() {
 		case <-quitItem.ClickedCh:
 			quitMount()
 			return
-		case <-ticker.C:
+		case <-updateTicker.C:
 			if stagedPath == "" {
 				if path := checkAndStageUpdate(); path != "" {
 					stagedPath = path
 					updateItem.Show()
 				}
 			}
+		case <-accountTicker.C:
+			refreshAccountInfo(planItem, storageItem)
 		}
 	}
+}
+
+// refreshAccountInfo fetches plan/storage info and updates the given menu
+// items - on failure (not logged in, offline, backend error) it leaves
+// whatever text was already showing in place rather than blanking out
+// previously-good info over a transient blip.
+func refreshAccountInfo(planItem, storageItem *systray.MenuItem) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info, err := zdrive.FetchAccountInfo(ctx)
+	if err != nil {
+		fs.Debugf(nil, "tray: couldn't refresh account info: %v", err)
+		return
+	}
+	planItem.SetTitle(fmt.Sprintf("Plan: %s", info.Plan))
+	storageItem.SetTitle(fmt.Sprintf("Storage: %s of %s used",
+		fs.SizeSuffix(info.StorageUsed), fs.SizeSuffix(info.StorageLimit)))
 }
 
 // checkAndStageUpdate compares the most recently backend-reported
@@ -162,14 +201,15 @@ func applyStagedUpdate(stagedPath string) bool {
 // stripping the API suffix the same way cmd/login's own verifyURL
 // derivation does - reusing that config value instead of hardcoding a
 // domain means this still works against staging or any other URL
-// someone logged in against.
-func openWebApp() {
+// someone logged in against. path is appended as-is (e.g. "/billing"),
+// or pass "" for the bare web app root.
+func openWebApp(path string) {
 	apiURL, ok := config.FileGetValue("zdrive", "url")
 	if !ok || apiURL == "" {
 		return
 	}
 	webURL := strings.TrimSuffix(strings.TrimSuffix(apiURL, "/api"), "/")
-	_ = oauthutil.OpenURL(webURL)
+	_ = oauthutil.OpenURL(webURL + path)
 }
 
 // quitMount sends this process its own interrupt, reusing rclone's
