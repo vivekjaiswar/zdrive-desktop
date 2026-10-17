@@ -31,6 +31,21 @@ func RunMain(mountFn func()) {
 		go func() {
 			defer zdrive.RecoverAndLog("mount (owned by tray main thread)")
 			mountFn()
+			// mountFn (cmd.Main()) returning means the mount itself has
+			// ended, one way or another. cmd.Main()'s own error path
+			// already calls os.Exit() directly, so this line only matters
+			// for a *clean* return - which real hardware testing
+			// 2026-10-17 showed does happen: ejecting the volume from
+			// Finder tears the mount down cleanly without going through
+			// our shutdownwait signal handler at all. Before main()
+			// called RunMain, that clean return happened on the real
+			// main goroutine, so the process exited naturally right
+			// after. Now it happens on this spawned goroutine instead -
+			// without an explicit exit here, systray.Run() on the real
+			// main goroutine has no idea the mount is gone and keeps the
+			// whole process alive indefinitely, silently orphaned with a
+			// tray and no mount behind it.
+			os.Exit(0)
 		}()
 		onReady()
 	}, func() {})
