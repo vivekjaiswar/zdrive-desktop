@@ -90,19 +90,23 @@ func install(execPath string, mountArgs []string) error {
 	// re-install with changed args/path actually takes effect immediately,
 	// not just on next login.
 	_ = exec.Command("launchctl", "bootout", launchdTarget()+"/"+label).Run()
-	if err := exec.Command("launchctl", "bootstrap", launchdTarget(), path).Run(); err != nil {
-		return err
-	}
+	return exec.Command("launchctl", "bootstrap", launchdTarget(), path).Run()
+}
 
-	// Best-effort, not fatal to install(): without a relauncher of some
-	// kind, quitting ZDrive from the tray (no KeepAlive, by design - a
-	// manual quit shouldn't fight back on) leaves a non-technical user
-	// with no way to bring it back except Terminal or a full logout/
-	// login. This gives Spotlight/Finder/Launchpad something to find.
+// ensureRelauncherApp is called unconditionally on every mount run (see
+// autostart.go), not just when the LaunchAgent registration itself
+// changes - a user upgrading via a normal .pkg reinstall keeps the exact
+// same exec path every time, so this can't be gated behind "registration
+// needed updating" or it would near-never run in practice. Best-effort:
+// without a relauncher of some kind, quitting ZDrive from the tray (no
+// KeepAlive, by design - a manual quit shouldn't fight back on) leaves a
+// non-technical user with no way to bring it back except Terminal or a
+// full logout/login. This gives Spotlight/Finder/Launchpad something to
+// find instead.
+func ensureRelauncherApp() {
 	if err := installRelauncherApp(); err != nil {
 		fs.Logf(nil, "autostart: couldn't install the relauncher app: %v", err)
 	}
-	return nil
 }
 
 const relauncherAppName = "ZDrive.app"
