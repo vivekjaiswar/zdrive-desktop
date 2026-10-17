@@ -33,5 +33,11 @@ func autoMountAfterLogin() {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Start(); err != nil {
 		fmt.Printf("(couldn't auto-mount: %v - run %s %s yourself)\n", err, execPath, strings.Join(args, " "))
+		return
 	}
+	// Explicit success confirmation, not silence - this prints into the
+	// same console pauseBeforeExit (pause_windows.go) keeps open, so a
+	// freshly-installed user always sees *something* happened, good or
+	// bad, instead of a window that looked empty either way.
+	fmt.Println("Mounting Z: now - check File Explorer in a few seconds.")
 }
