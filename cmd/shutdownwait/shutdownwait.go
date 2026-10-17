@@ -47,6 +47,18 @@ import (
 // having gained nothing.
 const maxDrainWait = 20 * time.Second
 
+// maxUnmountWait bounds the real unmount/cleanup step (atexit.Run(),
+// which runs nfsmount's own `diskutil umount force`). Confirmed on real
+// hardware (2026-10-17): that call can hang indefinitely - not a Go-level
+// deadlock, a macOS kernel-level NFS vnode wedge (the process became
+// unkillable even by SIGKILL, "trying to exit" in ps forever). Nothing
+// in this package can fix a kernel wedge, but it must never again leave
+// our own process waiting on it forever - better to exit having
+// abandoned a stuck unmount than to become a permanently stuck process
+// that blocks every future mount attempt at this path with "already
+// mounted" until a reboot.
+const maxUnmountWait = 15 * time.Second
+
 func init() {
 	prevPreRun := cmd.Root.PersistentPreRunE
 	cmd.Root.PersistentPreRunE = func(command *cobra.Command, args []string) error {
@@ -77,9 +89,34 @@ func watchForShutdown() {
 		}
 		fs.Logf(nil, "shutdown signal received (%s) - waiting up to %s for pending uploads", sig, maxDrainWait)
 		drainUploads()
-		atexit.Run()
+		runCleanupWithTimeout()
 		os.Exit(0)
 	}()
+}
+
+// runCleanupWithTimeout runs atexit.Run() (the real unmount/cleanup) but
+// never waits on it past maxUnmountWait - see that constant's comment.
+func runCleanupWithTimeout() {
+	runWithTimeout(atexit.Run, maxUnmountWait)
+}
+
+// runWithTimeout runs fn in the background and returns once it finishes
+// or timeout passes, whichever is first - fn is allowed to keep running
+// (and even finish) after a timeout, this just stops a stuck fn from
+// being able to block the caller forever. Split out from
+// runCleanupWithTimeout so a test can drive it with a fake hanging fn,
+// without touching rclone's real (global, shared) atexit state.
+func runWithTimeout(fn func(), timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		fs.Logf(nil, "shutdown: unmount/cleanup didn't finish within %s - exiting anyway", timeout)
+	}
 }
 
 // drainUploads polls the VFS write-back queue and returns as soon as
