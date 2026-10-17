@@ -39,7 +39,16 @@ polls until approved and saves the resulting token into rclone's
 config under the "zdrive" remote - so "zdrive mount zdrive: <path>"
 works afterwards with no env vars needed.`,
 	RunE: func(command *cobra.Command, args []string) error {
-		return doLogin(context.Background(), apiURL, time.Sleep, saveToken)
+		if err := doLogin(context.Background(), apiURL, time.Sleep, saveToken); err != nil {
+			return err
+		}
+		// Windows/macOS only (see automount_<os>.go) - a non-technical
+		// user shouldn't need a terminal for anything beyond whatever
+		// already ran "zdrive login" itself (the installer's finish
+		// page). No-op on Linux, where a manual "zdrive mount" is still
+		// the expected workflow.
+		autoMountAfterLogin()
+		return nil
 	},
 }
 
