@@ -47,7 +47,7 @@ const rootID = "root"
 // `-ldflags "-X .../backend/zdrive.ClientVersion=..."` to bake in a
 // -beta.N suffix without editing this file per beta build - see
 // .github/workflows/build.yml's beta-channel job.
-var ClientVersion = "0.3.6"
+var ClientVersion = "0.3.7"
 
 // ZDrive names may contain anything; encode only what can't be a path segment.
 const enc = encoder.Standard
