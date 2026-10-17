@@ -57,6 +57,13 @@ func ensureRegistered(mountArgs []string) {
 		return
 	}
 
+	// Independent of whether the registration below needs touching at
+	// all - a user upgrading via a normal .pkg reinstall keeps the exact
+	// same exec path every time, so gating this behind the same
+	// "registration changed" check below would mean it near-never runs
+	// in practice. No-op on Windows/Linux.
+	ensureRelauncherApp()
+
 	registeredPath, ok, err := isInstalled()
 	if err != nil {
 		fs.Logf(nil, "autostart: couldn't check existing registration: %v", err)
