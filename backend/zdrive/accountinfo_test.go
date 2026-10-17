@@ -13,7 +13,11 @@ func TestFetchAccountInfo(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"plan":"FREE","storageUsed":1234,"storageLimit":5368709120}`))
+		// storageUsed/storageLimit as JSON *strings* - the real shape (a
+		// Prisma BigInt field), confirmed against a live response. A bare
+		// JSON number here would have let the original int64-field bug
+		// (the whole decode silently failing) pass this test undetected.
+		_, _ = w.Write([]byte(`{"plan":"FREE","storageUsed":"1234","storageLimit":"5368709120"}`))
 	}))
 	defer srv.Close()
 

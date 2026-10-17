@@ -4,18 +4,18 @@ package tray
 
 import (
 	"bytes"
-	"image"
-	"image/color"
-	"image/png"
+	_ "embed"
 	"runtime"
 )
 
-const iconSize = 16
+const iconSize = 64
 
-// iconBytes generates a minimal tray icon - a solid circle, nothing
-// fancy - at runtime rather than shipping a static asset file. No
-// branding intent here; this exists only so the tray has an icon at all,
-// trivially replaceable later by a designer without touching code.
+//go:embed icon.png
+var iconPNG []byte
+
+// iconBytes returns the tray icon - the real ZDrive mark (cloud+Z),
+// cropped and squared from the brand logo, embedded at build time
+// rather than drawn at runtime.
 //
 // The two backends decode bytes differently (confirmed by reading their
 // native source, not assumed): Windows just writes the bytes to a .ico
@@ -25,32 +25,14 @@ const iconSize = 16
 // directly but has no idea what an .ico container is. Same source image,
 // wrapped differently per platform.
 func iconBytes() []byte {
-	png := encodePNGIcon()
 	if runtime.GOOS == "windows" {
-		return wrapICO(png)
+		return wrapICO(encodePNGIcon())
 	}
-	return png
+	return encodePNGIcon()
 }
 
 func encodePNGIcon() []byte {
-	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
-	fill := color.RGBA{R: 0x25, G: 0x63, B: 0xeb, A: 0xff} // ZDrive blue
-	cx, cy, r := float64(iconSize)/2, float64(iconSize)/2, float64(iconSize)/2-1
-	for y := 0; y < iconSize; y++ {
-		for x := 0; x < iconSize; x++ {
-			dx, dy := float64(x)+0.5-cx, float64(y)+0.5-cy
-			if dx*dx+dy*dy <= r*r {
-				img.SetRGBA(x, y, fill)
-			}
-		}
-	}
-
-	var buf bytes.Buffer
-	// Encode errors only on a broken io.Writer - bytes.Buffer never
-	// fails, so this is unreachable; ignored rather than threading an
-	// error return through iconBytes for a case that can't happen.
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
+	return iconPNG
 }
 
 // wrapICO builds the minimal single-image ICO container (a 6-byte
