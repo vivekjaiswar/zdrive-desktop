@@ -10,6 +10,7 @@ func TestIsMountCommand(t *testing.T) {
 		{"mount", true},
 		{"cmount", true},
 		{"nfsmount", true},
+		{"webdavmount", true},
 		{"login", false},
 		{"pin", false},
 		{"unpin", false},
