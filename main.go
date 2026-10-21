@@ -28,7 +28,6 @@ import (
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/shutdownwait"
 	"github.com/vivekjaiswar/zdrive-desktop/cmd/tray"
-	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/webdavmount"
 
 	"github.com/rclone/rclone/cmd"
 	_ "github.com/rclone/rclone/cmd/cat"
@@ -36,8 +35,6 @@ import (
 	_ "github.com/rclone/rclone/cmd/lsl"
 	_ "github.com/rclone/rclone/cmd/mount"
 	_ "github.com/rclone/rclone/cmd/nfsmount"
-	_ "github.com/rclone/rclone/cmd/serve"
-	_ "github.com/rclone/rclone/cmd/serve/webdav"
 	_ "github.com/rclone/rclone/cmd/version"
 	"github.com/rclone/rclone/fs/config"
 )
