@@ -89,7 +89,17 @@ func run(cmd *cobra.Command, args []string) error {
 	if err := child.Start(); err != nil {
 		return fmt.Errorf("starting WebDAV server: %w", err)
 	}
-	defer func() { _ = child.Wait() }()
+	// Watched (not just reaped by a bare defer Wait()) so that if the
+	// child dies on its own - crash, OOM, anything - this process
+	// notices and unmounts instead of leaving the OS's WebDAV mount
+	// pointing at a server that no longer exists. Confirmed as a real
+	// failure mode on real hardware (2026-10-21): a closed terminal tab
+	// sends SIGHUP, which this process didn't handle before, so it died
+	// without ever reaching the unmount step below - macOS's own
+	// webdavfs_agent then kept the mount "up" but non-functional
+	// ("Failed to stat node" on every access) until manually unmounted.
+	childDone := make(chan error, 1)
+	go func() { childDone <- child.Wait() }()
 
 	if err := waitForServer(addr, 10*time.Second); err != nil {
 		cancel()
@@ -103,9 +113,16 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	fs.Logf(nil, "Mounted %s at %s via WebDAV (%s)", remote, mountpoint, url)
 
+	// SIGHUP included alongside the usual INT/TERM specifically for the
+	// closed-terminal case above - this is the signal a controlling
+	// terminal's hangup actually sends, not INT or TERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	select {
+	case <-sigCh:
+	case err := <-childDone:
+		fs.Errorf(nil, "WebDAV server exited unexpectedly: %v", err)
+	}
 
 	if err := nativeUnmount(mountpoint); err != nil {
 		fs.Errorf(nil, "unmount failed: %v", err)
