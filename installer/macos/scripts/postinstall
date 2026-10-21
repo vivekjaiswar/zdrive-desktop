@@ -1,0 +1,11 @@
+#!/bin/bash
+# Runs as root after pkgbuild installs ZDrive.app to /Applications.
+# Keeps the documented CLI invocation (`zdrive login`, `zdrive mount ...`,
+# see README/docs) working unchanged now that the real binary lives inside
+# the app bundle at Contents/MacOS/zdrive instead of directly at
+# /usr/local/bin - a symlink there means both the CLI and the bundle
+# (Finder/Spotlight/Login Items) run the exact same executable.
+set -e
+mkdir -p /usr/local/bin
+ln -sf /Applications/ZDrive.app/Contents/MacOS/zdrive /usr/local/bin/zdrive
+exit 0

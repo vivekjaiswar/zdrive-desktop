@@ -100,28 +100,38 @@ jobs:
       # One-file .pkg per arch (no universal binary/lipo - matches the raw
       # binaries above, already shipped as separate arch-specific files).
       # No bundled driver needed here, unlike Windows/WinFsp - this project
-      # mounts on macOS via the OS's own built-in NFS client. No postinstall
-      # script either: pkgbuild's own payload mechanism places a file at
-      # --install-location with whatever permissions it already has in
-      # --root, which already covers "install this one executable" with
-      # nothing extra to script. (LaunchAgent registration for autostart
-      # happens on first `zdrive mount` run, not from this installer - see
-      # cmd/autostart - so root-run postinstall scripts never need to touch
-      # a user's home directory.)
+      # mounts on macOS via the OS's own built-in NFS client.
+      #
+      # Ships a real ZDrive.app bundle (not a bare binary at
+      # /usr/local/bin) - confirmed 2026-10-21 via research into what a
+      # legitimate macOS app needs: the pin daemon (backend/zdrive/pin.go)
+      # opens files directly under the NFS mountpoint from this very
+      # process, which only gets a non-blank "ZDrive would like to access
+      # files on a network volume" prompt (NSNetworkVolumesUsageDescription)
+      # if the running executable actually lives inside a bundle with an
+      # Info.plist - a bare binary has nowhere for that string to live, and
+      # TCC has no stable bundle identity to attach the grant to either.
+      # The postinstall script (installer/macos/scripts/postinstall)
+      # symlinks /usr/local/bin/zdrive to the bundled binary so the
+      # existing documented CLI invocation keeps working unchanged.
       - name: Build macOS .pkg installers
         run: |
           # $VERSION already computed above (includes the beta suffix,
           # if any) - reused here so the .pkg's own version metadata
           # matches what's actually baked into the binary inside it.
           for ARCH in arm64 amd64; do
-            rm -rf pkgroot && mkdir pkgroot
-            cp "dist/zdrive-macos-$ARCH" pkgroot/zdrive
-            chmod +x pkgroot/zdrive
+            rm -rf pkgroot
+            mkdir -p pkgroot/ZDrive.app/Contents/MacOS pkgroot/ZDrive.app/Contents/Resources
+            cp "dist/zdrive-macos-$ARCH" pkgroot/ZDrive.app/Contents/MacOS/zdrive
+            chmod +x pkgroot/ZDrive.app/Contents/MacOS/zdrive
+            cp installer/macos/Info.plist pkgroot/ZDrive.app/Contents/Info.plist
+            cp cmd/autostart/icon.icns pkgroot/ZDrive.app/Contents/Resources/icon.icns
             pkgbuild \
               --root pkgroot \
               --identifier com.zennialhub.zdrive \
               --version "$VERSION" \
-              --install-location /usr/local/bin \
+              --install-location /Applications \
+              --scripts installer/macos/scripts \
               "dist/zdrive-macos-$ARCH.pkg"
           done
           rm -rf pkgroot
