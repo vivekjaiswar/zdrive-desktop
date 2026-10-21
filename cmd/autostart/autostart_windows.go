@@ -20,10 +20,10 @@ const (
 	execPathValueName = "ZDrive_ExecPath"
 )
 
-// ensureRelauncherApp is a macOS-only concept (see autostart_darwin.go) -
+// relaunchIfRegistered is a macOS-only concept (see autostart_darwin.go) -
 // Windows already gets a Start Menu shortcut from the NSIS installer, so
 // there's nothing equivalent to add here.
-func ensureRelauncherApp() {}
+func relaunchIfRegistered() bool { return false }
 
 func install(execPath string, mountArgs []string) error {
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)

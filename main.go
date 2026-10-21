@@ -23,7 +23,7 @@ import (
 
 	_ "github.com/rclone/rclone/backend/local" // VFS cache storage
 	"github.com/vivekjaiswar/zdrive-desktop/backend/zdrive"
-	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/autostart"
+	"github.com/vivekjaiswar/zdrive-desktop/cmd/autostart"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/login"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/pin"
 	_ "github.com/vivekjaiswar/zdrive-desktop/cmd/shutdownwait"
@@ -49,6 +49,17 @@ func main() {
 	// As early as possible, before any command runs - so a failure in
 	// *any* command (not just mount) still lands in the local event log.
 	zdrive.SetupEventLogging(zdrive.EventLogPath(config.GetConfigPath()))
+	// Zero arguments at all is exactly what a Finder/Launchpad
+	// double-click produces (no way to pass a subcommand that way) -
+	// if a mount is already registered for this binary, relaunch it
+	// instead of falling through to cobra's "no command, print usage"
+	// default. Replaces a separate relauncher .app bundle this project
+	// used to install alongside the real one (2026-10-21) - having two
+	// ZDrive icons in Spotlight/Launchpad was a real, repeated source of
+	// confusion in hardware testing, not a cosmetic nitpick.
+	if len(os.Args) == 1 && autostart.RelaunchIfRegistered() {
+		return
+	}
 	// tray.RunMain is the real entrypoint, not cmd.Main() directly: on
 	// macOS specifically, a mount command needs systray's own event loop
 	// to own this actual main goroutine (see cmd/tray/entrypoint_darwin.go)
