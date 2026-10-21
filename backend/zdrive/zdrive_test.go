@@ -518,6 +518,150 @@ func TestMoveRecoversAtomicSave(t *testing.T) {
 	}
 }
 
+// TestMoveRecoversAtomicSaveAcrossSubfolder reproduces macOS's sandboxed
+// "safe save" pattern (confirmed via a real customer report 2026-10-21,
+// Excel on macOS specifically): rather than a same-folder temp-file
+// rename (what TestMoveRecoversAtomicSave above covers), the OS creates a
+// *new sibling folder* (named "filename.xlsx.sb-<token>-<token>" in
+// practice) next to the original, writes the new content as a file
+// inside it, then moves that file OUT to overwrite the original by name.
+// TestMoveRecoversAtomicSave's own recovery check only fires when
+// srcDirID == dstDirID (Move, zdrive.go) - this is a genuine
+// cross-directory move, so recovery was never reached, and the result
+// was a brand-new object replacing the original's id/version history
+// (or, worse, a real sharing/5xx failure on the move itself) - exactly
+// matching the reported "sharing violation" / "couldn't find temp
+// document" dialog chain.
+func TestMoveRecoversAtomicSaveAcrossSubfolder(t *testing.T) {
+	type rec struct {
+		Name      string
+		FolderID  *string
+		DeletedAt *time.Time
+		Content   string
+	}
+	files := map[string]*rec{}
+	folders := map[string]string{} // id -> name, parent tracking not needed for this test
+	nextID := 0
+	nextFolderID := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/drive/list":
+			io.WriteString(w, `{"folders":[],"files":[],"nextCursor":null}`)
+		case r.URL.Path == "/folders" && r.Method == "POST":
+			nextFolderID++
+			id := fmt.Sprintf("d%d", nextFolderID)
+			var body struct{ Name string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			folders[id] = body.Name
+			fmt.Fprintf(w, `{"id":%q,"name":%q}`, id, body.Name)
+		case r.URL.Path == "/storage/upload":
+			r.ParseMultipartForm(1 << 20)
+			fh := r.MultipartForm.File["file"][0]
+			part, _ := fh.Open()
+			body, _ := io.ReadAll(part)
+			nextID++
+			id := fmt.Sprintf("f%d", nextID)
+			files[id] = &rec{Name: fh.Filename, Content: string(body)}
+			fmt.Fprintf(w, `{"id":%q,"name":%q,"size":%d}`, id, fh.Filename, len(body))
+		case strings.HasSuffix(r.URL.Path, "/stream"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/stream")
+			io.WriteString(w, files[id].Content)
+		case strings.HasSuffix(r.URL.Path, "/version"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/version")
+			r.ParseMultipartForm(1 << 20)
+			fh := r.MultipartForm.File["file"][0]
+			part, _ := fh.Open()
+			body, _ := io.ReadAll(part)
+			files[id].Content = string(body)
+			files[id].Name = fh.Filename
+			fmt.Fprintf(w, `{"file":{"id":%q,"name":%q,"size":%d,"updatedAt":"2026-09-28T12:00:00Z"}}`, id, fh.Filename, len(body))
+		case strings.HasSuffix(r.URL.Path, "/restore"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/restore")
+			files[id].DeletedAt = nil
+		case strings.HasSuffix(r.URL.Path, "/move"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/files/"), "/move")
+			var body struct {
+				FolderID *string `json:"folderId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			files[id].FolderID = body.FolderID
+			fmt.Fprintf(w, `{"id":%q,"name":%q,"size":%d,"updatedAt":"2026-09-28T12:00:01Z"}`, id, files[id].Name, len(files[id].Content))
+		case r.URL.Path == "/files/trash":
+			io.WriteString(w, `[`)
+			first := true
+			for id, rc := range files {
+				if rc.DeletedAt == nil {
+					continue
+				}
+				if !first {
+					io.WriteString(w, ",")
+				}
+				first = false
+				folder := "null"
+				if rc.FolderID != nil {
+					folder = `"` + *rc.FolderID + `"`
+				}
+				fmt.Fprintf(w, `{"id":%q,"name":%q,"folderId":%s,"deletedAt":%q}`, id, rc.Name, folder, rc.DeletedAt.Format(time.RFC3339))
+			}
+			io.WriteString(w, `]`)
+		case r.Method == "DELETE":
+			id := strings.TrimPrefix(r.URL.Path, "/files/")
+			now := time.Now()
+			files[id].DeletedAt = &now
+			io.WriteString(w, `{}`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	f, err := NewFs(ctx, "zdrive", "", configmap.Simple{"url": srv.URL, "token": "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := f.Put(ctx, strings.NewReader("v1"), object.NewStaticObjectInfo("oji_permissions_sales.xlsx", time.Now(), 2, true, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origID := orig.(*Object).id
+
+	if err := orig.Remove(ctx); err != nil { // stands in for operations.Move's delete-before-overwrite
+		t.Fatal(err)
+	}
+
+	// The sandboxed temp file, inside a brand-new sibling folder - not the
+	// same folder as the original, unlike TestMoveRecoversAtomicSave.
+	tmp, err := f.Put(ctx, strings.NewReader("v2 edited"),
+		object.NewStaticObjectInfo("oji_permissions_sales.xlsx.sb-9a1ea2bc-zSXX1S/CB55B210.MACTF", time.Now(), 9, true, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpID := tmp.(*Object).id
+
+	result, err := f.Features().Move(ctx, tmp, "oji_permissions_sales.xlsx")
+	if err != nil {
+		t.Fatalf("Move = %v", err)
+	}
+	if result.(*Object).id != origID {
+		t.Fatalf("Move result id = %q, want the original's id %q (identity/version history must survive a sandboxed save too)", result.(*Object).id, origID)
+	}
+	if result.Remote() != "oji_permissions_sales.xlsx" {
+		t.Fatalf("Move result remote = %q", result.Remote())
+	}
+	if files[origID].Content != "v2 edited" {
+		t.Fatalf("original's content = %q, want the edited content", files[origID].Content)
+	}
+	if files[origID].DeletedAt != nil {
+		t.Fatal("original should have been restored, not left trashed")
+	}
+	if files[tmpID].DeletedAt == nil {
+		t.Fatal("the leftover temp object should have been discarded")
+	}
+}
+
 // TestPutLarge: the presigned-multipart flow (B6) - initiate, PUT the part
 // directly to the presigned URL (not through the API server), complete.
 // Calls putLarge directly rather than through Put() so the test payload

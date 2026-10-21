@@ -657,16 +657,26 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 
 // Move moves and/or renames a file: PATCH /files/:id/move then PATCH /files/:id.
 //
-// A same-folder rename onto an existing name is how an atomic editor save
-// looks by the time it reaches us: write a temp file, then rename it over
-// the original. rclone's own move helper (operations.Move) deletes the
-// destination object first, then renames the temp file onto its name - so
-// without help here, the original file's identity and version history
-// would be silently replaced by the temp upload. Recover: if a file was
-// JUST trashed under the destination name, treat this as "the temp content
-// is a new version of the original" - restore it, upload as its next
-// version, and discard the temp object - instead of letting the rename
-// finish creating a fresh file with no history under the old name.
+// A rename onto an existing name is how an atomic editor save looks by the
+// time it reaches us: write a temp file, then rename it over the original.
+// rclone's own move helper (operations.Move) deletes the destination object
+// first, then renames the temp file onto its name - so without help here,
+// the original file's identity and version history would be silently
+// replaced by the temp upload. Recover: if a file was JUST trashed under
+// the destination name, treat this as "the temp content is a new version
+// of the original" - restore it, upload as its next version, and discard
+// the temp object - instead of letting the rename finish creating a fresh
+// file with no history under the old name.
+//
+// Deliberately not gated on srcDirID == dstDirID (confirmed missing via a
+// real customer report 2026-10-21, Excel on macOS): recoverFromAtomicSave
+// only looks at the *destination* folder/name, never the source's, so a
+// same-folder restriction here was never actually load-bearing for it -
+// it just meant a cross-directory atomic save (macOS's sandboxed "safe
+// save" pattern: a new sibling ".sb-<token>" folder holds the temp file,
+// which then moves OUT to overwrite the original) silently fell through
+// to an ordinary move instead, losing the original's identity/version
+// history exactly the same way the same-folder case used to.
 func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
@@ -683,14 +693,12 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if err != nil {
 		return nil, err
 	}
-	if srcDirID == dstDirID {
-		recovered, rErr := f.recoverFromAtomicSave(ctx, srcObj, dstDirID, dstLeaf, remote)
-		if rErr != nil {
-			return nil, rErr
-		}
-		if recovered != nil {
-			return recovered, nil
-		}
+	recovered, rErr := f.recoverFromAtomicSave(ctx, srcObj, dstDirID, dstLeaf, remote)
+	if rErr != nil {
+		return nil, rErr
+	}
+	if recovered != nil {
+		return recovered, nil
 	}
 	var file apiFile
 	// updatedAt bumps on every write, so the revision guarding the second
