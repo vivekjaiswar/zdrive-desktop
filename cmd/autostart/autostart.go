@@ -57,13 +57,6 @@ func ensureRegistered(mountArgs []string) {
 		return
 	}
 
-	// Independent of whether the registration below needs touching at
-	// all - a user upgrading via a normal .pkg reinstall keeps the exact
-	// same exec path every time, so gating this behind the same
-	// "registration changed" check below would mean it near-never runs
-	// in practice. No-op on Windows/Linux.
-	ensureRelauncherApp()
-
 	registeredPath, ok, err := isInstalled()
 	if err != nil {
 		fs.Logf(nil, "autostart: couldn't check existing registration: %v", err)
@@ -76,6 +69,17 @@ func ensureRegistered(mountArgs []string) {
 	if err := install(execPath, mountArgs); err != nil {
 		fs.Logf(nil, "autostart: couldn't register: %v", err)
 	}
+}
+
+// RelaunchIfRegistered re-kicks the registered mount (macOS only - see
+// autostart_darwin.go) if this exact binary already has one registered,
+// and reports whether it did. Called from main.go before any cobra
+// dispatch, specifically for the case of zero arguments at all - exactly
+// what a Finder/Launchpad double-click produces - so double-clicking the
+// installed app bundle restarts the mount instead of just printing
+// cobra's usage text.
+func RelaunchIfRegistered() bool {
+	return relaunchIfRegistered()
 }
 
 var autostartCommand = &cobra.Command{

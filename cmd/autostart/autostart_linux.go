@@ -13,10 +13,10 @@ import "fmt"
 // `zdrive autostart install/uninstall` themselves, where a clear error is
 // the right answer.
 
-// ensureRelauncherApp is a macOS-only concept (see autostart_darwin.go);
-// unreachable on Linux anyway since ensureRegistered returns before this
-// would be called, but still needs to exist for this file to compile.
-func ensureRelauncherApp() {}
+// relaunchIfRegistered is a macOS-only concept (see autostart_darwin.go);
+// still needs to exist for this file to compile and for main.go's
+// unconditional call to resolve on every platform.
+func relaunchIfRegistered() bool { return false }
 
 func install(execPath string, mountArgs []string) error {
 	return fmt.Errorf("autostart isn't supported on this platform build (Linux is dev-only)")
