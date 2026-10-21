@@ -81,6 +81,52 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: zdrive-binaries, path: dist/ }
 
+  # First real-Windows-hardware installer check (2026-10-21 design doc:
+  # "zdrive-desktop Windows-first reliability"). Deliberately minimal -
+  # just install + confirm WinFsp's kernel driver actually loaded. The
+  # outer NSIS installer's own silent-install behavior (does /S hang on a
+  # dialog?) was already confirmed clean locally via Wine - the one thing
+  # Wine structurally can't test is whether a real Windows kernel will
+  # accept WinFsp's driver with no reboot inside a fresh, ephemeral CI
+  # runner. That's the actual open question this job answers before any
+  # further smoke-test scenario (mount, atomic-save, kill-mid-write) gets
+  # built on top of it - no point testing a mount if the driver never
+  # loads. Runs on every push (not just tags) so this fails fast.
+  smoke-test-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: zdrive-binaries, path: dist }
+      - name: Silent install
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\zdrive-windows-setup.exe" -ArgumentList "/S" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Installer exited with code $($proc.ExitCode)"
+            exit 1
+          }
+      - name: Confirm WinFsp driver actually installed
+        shell: pwsh
+        run: |
+          $key = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\WinFsp" -Name "InstallDir" -ErrorAction SilentlyContinue
+          if (-not $key) {
+            Write-Error "WinFsp InstallDir registry key missing - driver did not install"
+            exit 1
+          }
+          Write-Host "WinFsp installed at: $($key.InstallDir)"
+      - name: Confirm ZDrive binary + uninstaller landed
+        shell: pwsh
+        run: |
+          $installDir = "$env:LOCALAPPDATA\ZDrive"
+          foreach ($f in @("zdrive-windows-amd64.exe", "Uninstall.exe")) {
+            if (-not (Test-Path "$installDir\$f")) {
+              Write-Error "$f missing from $installDir"
+              exit 1
+            }
+          }
+          Write-Host "Install verified at $installDir"
+
   # Separate, native runner (not cross-compiled from Linux) - a future tray
   # icon (M4) and the macOS .pkg installer (pkgbuild) both need real macOS
   # tooling/cgo, which ubuntu-latest can't provide. arm64 is this runner's
